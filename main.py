@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 API REST utilisant QGIS en mode headless (FastAPI)
-Version améliorée : initialisation sûre, sessions thread-safe, endpoints fonctionnels,
-startup/shutdown, gestion propre des fichiers temporaires et journalisation.
+Version complète : reprend toutes les fonctionnalités du code DRF fourni.
+Architecture propre, gestion des sessions, nettoyage, logging, erreurs.
 """
 
 import os
@@ -12,15 +12,24 @@ import shutil
 import tempfile
 import threading
 import traceback
+import asyncio
+import zipfile
+import json
+import math
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from datetime import datetime, timedelta
+from enum import Enum
 
 import logging
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Query, Path as FastPath
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, validator
 import uvicorn
+from PyQt5.QtCore import QSize, Qt, QPoint
+from PyQt5.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont, QImageReader
+from PyPDF2 import PdfMerger
 
 # ---------- Configuration logging ----------
 logging.basicConfig(
@@ -29,18 +38,154 @@ logging.basicConfig(
 )
 logger = logging.getLogger("qgis_headless_api")
 
-# ---------- Globals (initialement vides, gérés via fonctions) ----------
+# ---------- Globals ----------
 qgis_manager = None
 project_sessions: Dict[str, "ProjectSession"] = {}
 project_sessions_lock = threading.Lock()
 
+# ---------- Enums ----------
+class ImageFormat(str, Enum):
+    png = "png"
+    jpg = "jpg"
+    jpeg = "jpeg"
+
+class GridType(str, Enum):
+    lines = "lines"
+    dots = "dots"
+    crosses = "crosses"
+
+class LabelPosition(str, Enum):
+    corners = "corners"
+    edges = "edges"
+    all = "all"
+
+# ---------- Pydantic Models ----------
+class StandardResponse(BaseModel):
+    success: bool
+    timestamp: str
+    data: Optional[Any] = None
+    message: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class MapRequest(BaseModel):
+    session_id: str
+    width: int = Field(800, ge=100, le=4000)
+    height: int = Field(600, ge=100, le=4000)
+    format_image: ImageFormat = ImageFormat.png
+    quality: int = Field(90, ge=1, le=100)
+    background: str = "transparent"
+    bbox: Optional[str] = None
+    scale: Optional[float] = None
+    dpi: int = Field(96, ge=72, le=300)
+    show_points: Optional[str] = None
+    points_style: str = "circle"
+    points_color: str = "#FF0000"
+    points_size: int = Field(10, ge=1, le=50)
+    points_labels: bool = False
+    show_grid: bool = False
+    grid_type: GridType = GridType.lines
+    grid_spacing: float = Field(1.0, ge=0.001)
+    grid_color: str = "#0000FF"
+    grid_width: int = Field(1, ge=1, le=10)
+    grid_size: int = Field(3, ge=1, le=20)
+    grid_labels: bool = False
+    grid_label_position: LabelPosition = LabelPosition.edges
+    grid_vertical_labels: bool = False
+    grid_label_font_size: int = Field(8, ge=6, le=20)
+
+class LayerInfo(BaseModel):
+    id: str
+    name: str
+    source: str
+    crs: Optional[str]
+    extent: Optional[Dict[str, float]]
+    type: str
+    geometry_type: Optional[str] = None
+    feature_count: Optional[int] = None
+    fields_count: Optional[int] = None
+    provider: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    bands: Optional[int] = None
+
+class ProjectInfo(BaseModel):
+    title: str
+    file_name: str
+    crs: Optional[str]
+    extent: Optional[Dict[str, float]]
+    layers: List[LayerInfo]
+    layers_count: int
+    session_id: str
+    created_at: str
+    last_accessed: str
+
+class CreateProjectRequest(BaseModel):
+    title: str = "Nouveau Projet"
+    crs: str = "EPSG:4326"
+    session_id: Optional[str] = None
+
+class LoadProjectRequest(BaseModel):
+    project_path: str
+    session_id: Optional[str] = None
+
+class AddVectorLayerRequest(BaseModel):
+    data_source: str
+    layer_name: str = "Couche Vectorielle"
+    session_id: str
+    is_parcelle: bool = False
+    output_polygon_layer: Optional[str] = None
+    output_points_layer: Optional[str] = None
+    enable_point_labels: bool = False
+    label_field: str = "Bornes"
+    label_color: str = "#000000"
+    label_size: int = 10
+    label_offset_x: int = 0
+    label_offset_y: int = 0
+
+class AddRasterLayerRequest(BaseModel):
+    data_source: str
+    layer_name: str = "Couche Raster"
+    session_id: str
+
+class SaveProjectRequest(BaseModel):
+    session_id: str
+    project_path: Optional[str] = None
+
+class RemoveLayerRequest(BaseModel):
+    layer_id: str
+    session_id: str
+
+class ZoomToLayerRequest(BaseModel):
+    layer_id: str
+    session_id: str
+
+class GetLayerFeaturesRequest(BaseModel):
+    limit: int = 100
+    offset: int = 0
+    attributes_only: bool = False
+
+class ExecuteProcessingRequest(BaseModel):
+    algorithm: str
+    parameters: Dict[str, Any]
+    output_format: str = "json"
+
+class GenerateCroquisRequest(BaseModel):
+    session_id: str
+    region: str
+    province: str
+    commune: str
+    village: str
+    demandeur: str
+    phone: Optional[str] = None
+    agent: Optional[str] = None
+    option: str = "A"
+    sections: Optional[str] = None
+    nb_ordre: Optional[str] = None
+    nb_cnib: Optional[str] = None
 
 # ---------- QgisManager ----------
 class QgisManager:
-    """
-    Gère l'initialisation "headless" de QGIS et fournit accès aux classes QGIS importées.
-    L'initialisation est idempotente et journalisée.
-    """
     def __init__(self):
         self._initialized = False
         self._initialization_attempted = False
@@ -49,15 +194,13 @@ class QgisManager:
         self.init_errors: List[str] = []
 
     def _setup_qgis_environment(self):
-        """Configurer l'environnement pour QGIS headless avant import."""
-        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-        os.environ.setdefault('QT_DEBUG_PLUGINS', '0')
-        # Définitions optionnelles :
-        # os.environ.setdefault('QGIS_PREFIX_PATH', '/usr')
-        logger.debug("Variables d'environnement QGIS configurées")
+        os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+        os.environ['QT_DEBUG_PLUGINS'] = '0'
+        os.environ['QT_QPA_FONTDIR'] = os.path.join(os.path.dirname(__file__), 'ttf')
+        os.environ['QT_NO_CPU_FEATURE'] = 'sse4.1,sse4.2,avx,avx2'
+        logger.info("Environnement QGIS configuré")
 
     def initialize(self) -> Tuple[bool, Optional[str]]:
-        """Initialiser QGIS de manière sûre (idempotente)."""
         if self._initialized:
             return True, None
         if self._initialization_attempted:
@@ -69,8 +212,7 @@ class QgisManager:
         try:
             self._setup_qgis_environment()
 
-            # Importer PyQt5 puis QGIS - après configuration d'environnement
-            from PyQt5.QtCore import QCoreApplication  # noqa: F401
+            from PyQt5.QtCore import QCoreApplication
 
             from qgis.core import (
                 Qgis,
@@ -83,10 +225,12 @@ class QgisManager:
                 QgsProcessingFeedback,
                 QgsProcessingContext,
                 QgsRectangle,
+                QgsCoordinateReferenceSystem,
                 QgsPalLayerSettings,
                 QgsTextFormat,
                 QgsVectorLayerSimpleLabeling,
                 QgsLayoutExporter,
+                QgsWkbTypes
             )
 
             from qgis.analysis import QgsNativeAlgorithms
@@ -96,38 +240,29 @@ class QgisManager:
                 self.qgs_app = QgsApplication([], False)
                 self.qgs_app.initQgis()
                 logger.info("Application QGIS initialisée")
+                QgsApplication.processingRegistry().addProvider(QgsNativeAlgorithms())
+                logger.info("Algorithmes natifs ajoutés")
             else:
                 self.qgs_app = QgsApplication.instance()
                 logger.info("Instance QGIS existante utilisée")
 
-            # Initialiser processing et enregistrer providers natifs
             try:
-                # preferred import
-                import processing  # type: ignore
-                logger.info("Module processing importé directement")
-            except Exception:
-                # fallback
+                import processing
+                logger.info("Module processing importé avec succès")
+            except ImportError as e:
+                logger.warning(f"Import direct de processing échoué: {e}")
                 try:
-                    from qgis import processing  # type: ignore
-                    logger.info("Module qgis.processing importé")
-                except Exception as e2:
-                    logger.warning(f"Import de processing a échoué: {e2}")
-                    # mock minimal
+                    from qgis import processing
+                    logger.info("Module qgis.processing importé avec succès")
+                except ImportError as e2:
+                    logger.error(f"Import qgis.processing également échoué: {e2}")
                     class MockProcessing:
                         @staticmethod
                         def run(*args, **kwargs):
                             raise NotImplementedError("Processing module not available")
                     processing = MockProcessing()
-                    logger.warning("Utilisation d'un mock 'processing'")
+                    logger.warning("Utilisation d'un mock processing")
 
-            # Register native algorithms (safe even if already registered)
-            try:
-                QgsApplication.processingRegistry().addProvider(QgsNativeAlgorithms())
-                logger.info("QgsNativeAlgorithms ajoutés au processing registry")
-            except Exception as e:
-                logger.warning(f"Impossible d'ajouter QgsNativeAlgorithms: {e}")
-
-            # Stockage des classes utiles pour usage ultérieur
             self.classes = {
                 'Qgis': Qgis,
                 'QgsApplication': QgsApplication,
@@ -140,11 +275,13 @@ class QgisManager:
                 'QgsProcessingContext': QgsProcessingContext,
                 'QgsNativeAlgorithms': QgsNativeAlgorithms,
                 'QgsRectangle': QgsRectangle,
+                'QgsCoordinateReferenceSystem': QgsCoordinateReferenceSystem,
                 'processing': processing,
                 'QgsPalLayerSettings': QgsPalLayerSettings,
                 'QgsTextFormat': QgsTextFormat,
                 'QgsVectorLayerSimpleLabeling': QgsVectorLayerSimpleLabeling,
                 'QgsLayoutExporter': QgsLayoutExporter,
+                'QgsWkbTypes': QgsWkbTypes
             }
 
             self._initialized = True
@@ -153,7 +290,7 @@ class QgisManager:
 
         except Exception as e:
             tb = traceback.format_exc()
-            error_msg = f"Erreur d'initialisation QGIS: {e}"
+            error_msg = f"Erreur d'initialisation: {e}"
             self.init_errors.append(error_msg + "\n" + tb)
             logger.error(error_msg)
             logger.debug(tb)
@@ -171,24 +308,17 @@ class QgisManager:
         return self.init_errors
 
     def cleanup(self):
-        """Nettoyage à l'arrêt (libérer QGIS)."""
         try:
             if self.qgs_app:
-                try:
-                    # exitQgis si disponible
-                    self.qgs_app.exitQgis()
-                    logger.info("QGIS arrêté (exitQgis).")
-                except Exception as e:
-                    logger.warning(f"Erreur lors de l'arrêt de QGIS: {e}")
+                self.qgs_app.exitQgis()
+                logger.info("QGIS arrêté.")
                 self.qgs_app = None
             self._initialized = False
         except Exception as e:
             logger.error(f"Erreur cleanup QgisManager: {e}")
 
-
 # ---------- ProjectSession ----------
 class ProjectSession:
-    """Gère un projet QGIS isolé pour une session donnée (création, accès, nettoyage)."""
     def __init__(self, session_id: Optional[str] = None):
         self.session_id = session_id or str(uuid.uuid4())
         self.project = None
@@ -197,12 +327,9 @@ class ProjectSession:
         self.temporary_files: List[str] = []
 
     def get_project(self, qgs_project_class):
-        """Retourne une instance QgsProject pour la session (lazy)."""
         if self.project is None:
-            # créer une instance indépendante (QgsProject())
             self.project = qgs_project_class()
             try:
-                # si l'instance a setTitle
                 self.project.setTitle(f"Session Project - {self.session_id}")
             except Exception:
                 pass
@@ -213,19 +340,17 @@ class ProjectSession:
         self.temporary_files.append(path)
 
     def cleanup(self):
-        """Nettoyage des ressources associées à la session."""
         try:
             if self.project:
-                try:
-                    # clear ou autre méthode pour libérer le projet
-                    self.project.clear()
-                except Exception:
-                    pass
+                self.project.clear()
                 self.project = None
 
             for p in list(self.temporary_files):
                 try:
-                    if os.path.exists(p):
+                    if os.path.isdir(p):
+                        shutil.rmtree(p)
+                        logger.debug(f"Supprimé dossier temporaire: {p}")
+                    elif os.path.exists(p):
                         os.remove(p)
                         logger.debug(f"Supprimé fichier temporaire: {p}")
                 except Exception as e:
@@ -234,14 +359,12 @@ class ProjectSession:
         except Exception as e:
             logger.error(f"Erreur nettoyage session {self.session_id}: {e}")
 
-
-# ---------- Utilitaires pour gestion globale ----------
+# ---------- Utilitaires ----------
 def get_qgis_manager() -> QgisManager:
     global qgis_manager
     if qgis_manager is None:
         qgis_manager = QgisManager()
     return qgis_manager
-
 
 def initialize_qgis_if_needed() -> Tuple[bool, Optional[str]]:
     manager = get_qgis_manager()
@@ -249,12 +372,7 @@ def initialize_qgis_if_needed() -> Tuple[bool, Optional[str]]:
         return manager.initialize()
     return True, None
 
-
 def get_project_session(session_id: Optional[str] = None) -> Tuple[ProjectSession, bool]:
-    """
-    Retourne (session, created_flag)
-    created_flag=True si une nouvelle session a été créée.
-    """
     global project_sessions, project_sessions_lock
     if session_id is None:
         session = ProjectSession()
@@ -270,7 +388,6 @@ def get_project_session(session_id: Optional[str] = None) -> Tuple[ProjectSessio
             return session, True
         else:
             return existing, False
-
 
 def cleanup_expired_sessions(max_age_hours: int = 24):
     global project_sessions, project_sessions_lock
@@ -291,57 +408,209 @@ def cleanup_expired_sessions(max_age_hours: int = 24):
     if expired:
         logger.info(f"Nettoyé {len(expired)} sessions expirées: {expired}")
 
+def standard_response(
+    success: bool,
+    data: Any = None,
+    message: str = None,
+    error: Any = None,
+    status_code: int = 200,
+    metadata: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    return {
+        "success": success,
+        "timestamp": datetime.utcnow().isoformat(),
+        "data": data,
+        "message": message,
+        "error": error,
+        "metadata": metadata or {}
+    }
 
-# ---------- Pydantic models ----------
-class MapRequest(BaseModel):
-    layers: List[str]
-    extent: Optional[List[float]] = None  # [xmin, ymin, xmax, ymax]
-    width: int = 800
-    height: int = 600
-    crs: str = "EPSG:4326"
-    format: str = "PNG"
-    session_id: Optional[str] = None
+def handle_exception(e: Exception, context: str = "", user_message: str = None) -> JSONResponse:
+    logger.error(f"Exception in {context}: {str(e)}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content=standard_response(
+            success=False,
+            error={
+                'type': type(e).__name__,
+                'message': str(e),
+                'context': context
+            },
+            message=user_message or f"Une erreur est survenue: {context}",
+            metadata={
+                'request_id': 'req_' + datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f'),
+                'suggested_action': 'Veuillez réessayer ou contacter le support technique'
+            }
+        )
+    )
 
+def format_layer_info(layer) -> Dict[str, Any]:
+    from qgis.core import QgsVectorLayer, QgsRasterLayer, QgsWkbTypes
+    base_info = {
+        'id': layer.id(),
+        'name': layer.name(),
+        'source': layer.source(),
+        'crs': layer.crs().authid() if layer.crs() else None
+    }
 
-class LayerInfo(BaseModel):
-    name: str
-    type: str
-    crs: str
-    extent: List[float]
-    feature_count: Optional[int] = None
+    try:
+        extent = layer.extent()
+        if extent and not extent.isEmpty():
+            base_info['extent'] = {
+                'xmin': round(extent.xMinimum(), 6),
+                'ymin': round(extent.yMinimum(), 6),
+                'xmax': round(extent.xMaximum(), 6),
+                'ymax': round(extent.yMaximum(), 6),
+            }
+    except:
+        base_info['extent'] = None
 
+    if isinstance(layer, QgsVectorLayer):
+        base_info.update({
+            'type': 'vector',
+            'geometry_type': str(layer.geometryType()),
+            'geometry_type_name': QgsWkbTypes.displayString(layer.wkbType()) if hasattr(layer, 'wkbType') else 'Unknown',
+            'feature_count': layer.featureCount(),
+            'fields_count': len(layer.fields()),
+            'provider': layer.providerType()
+        })
+    elif isinstance(layer, QgsRasterLayer):
+        base_info.update({
+            'type': 'raster',
+            'width': layer.width() if hasattr(layer, 'width') else None,
+            'height': layer.height() if hasattr(layer, 'height') else None,
+            'bands': layer.bandCount() if hasattr(layer, 'bandCount') else None
+        })
+    else:
+        base_info.update({
+            'type': 'unknown',
+            'layer_type': str(type(layer))
+        })
 
-class ProcessingRequest(BaseModel):
-    algorithm: str
-    parameters: Dict[str, Any]
-    session_id: Optional[str] = None
+    return base_info
 
+def is_clockwise(points):
+    return sum((p2.x() - p1.x()) * (p2.y() + p1.y()) for p1, p2 in zip(points, points[1:] + [points[0]])) > 0
 
-# ---------- FastAPI app ----------
+def shift_to_northernmost(points):
+    if not points:
+        return points
+    idx = max(range(len(points)), key=lambda i: points[i].y())
+    return points[idx:] + points[:idx]
+
+def calculate_distance(p1, p2):
+    return math.hypot(p2.x() - p1.x(), p2.y() - p1.y())
+
+def create_polygon_with_vertex_points(layer, output_polygon_layer=None, output_points_layer=None):
+    from qgis.core import QgsVectorLayer, QgsFeature, QgsGeometry, QgsField, QgsVectorFileWriter, QgsWkbTypes
+    from PyQt5.QtCore import QVariant
+
+    points = []
+    for feature in layer.getFeatures():
+        geom = feature.geometry()
+        if geom.type() == QgsWkbTypes.PointGeometry:
+            if geom.isMultipart():
+                points.extend(geom.asMultiPoint())
+            else:
+                points.append(geom.asPoint())
+        elif geom.type() == QgsWkbTypes.LineGeometry:
+            if geom.isMultipart():
+                for part in geom.asMultiPolyline():
+                    points.extend(part)
+            else:
+                points.extend(geom.asPolyline())
+        elif geom.type() == QgsWkbTypes.PolygonGeometry:
+            if geom.isMultipart():
+                for part in geom.asMultiPolygon():
+                    for ring in part:
+                        points.extend(ring)
+            else:
+                for ring in geom.asPolygon():
+                    points.extend(ring)
+
+    if len(points) < 3:
+        raise Exception("Il faut au moins 3 points pour créer un polygone")
+
+    points = list(filter(None, points))
+    if not points:
+        raise ValueError("Aucun point valide trouvé.")
+
+    sorted_points = list(dict.fromkeys(points))
+    if not is_clockwise(sorted_points):
+        sorted_points.reverse()
+    sorted_points = shift_to_northernmost(sorted_points)
+
+    polygon_geom = QgsGeometry.fromPolygonXY([sorted_points])
+    polygon_layer = QgsVectorLayer("Polygon?crs=" + layer.crs().authid(), "Polygone", "memory")
+    polygon_provider = polygon_layer.dataProvider()
+    polygon_provider.addAttributes([
+        QgsField("id", QVariant.String),
+        QgsField("Superficie", QVariant.Double)
+    ])
+    polygon_layer.updateFields()
+
+    polygon_feature = QgsFeature()
+    polygon_feature.setGeometry(polygon_geom)
+    area_m2 = polygon_geom.area()
+    polygon_feature.setAttributes([1, area_m2])
+    polygon_provider.addFeatures([polygon_feature])
+
+    points_layer = QgsVectorLayer("Point?crs=" + layer.crs().authid(), "Points", "memory")
+    points_provider = points_layer.dataProvider()
+    points_provider.addAttributes([QgsField(n, t) for n, t in [("Bornes", QVariant.String), ("X", QVariant.Int), ("Y", QVariant.Int), ("Distance", QVariant.Double)]])
+    points_layer.updateFields()
+
+    point_features = []
+    for i, point in enumerate(sorted_points):
+        point_feature = QgsFeature()
+        point_feature.setGeometry(QgsGeometry.fromPointXY(point))
+        point_feature.setAttributes([f"B{i+1}", int(point.x()), int(point.y()), round(calculate_distance(point, sorted_points[(i+1) % len(sorted_points)]), 2)])
+        point_features.append(point_feature)
+    points_provider.addFeatures(point_features)
+
+    if output_polygon_layer:
+        QgsVectorFileWriter.writeAsVectorFormat(polygon_layer, output_polygon_layer, "UTF-8", polygon_layer.crs(), "ESRI Shapefile")
+    if output_points_layer:
+        QgsVectorFileWriter.writeAsVectorFormat(points_layer, output_points_layer, "UTF-8", points_layer.crs(), "ESRI Shapefile")
+
+    return polygon_layer, points_layer
+
+async def periodic_cleanup():
+    while True:
+        await asyncio.sleep(3600)
+        cleanup_expired_sessions(max_age_hours=24)
+
+# ---------- FastAPI App ----------
 app = FastAPI(
-    title="API QGIS Headless",
-    description="API REST pour traitement géospatial avec QGIS (headless)",
+    title="API QGIS Headless - FlashCroquis",
+    description="API REST complète pour traitement géospatial avec QGIS (headless)",
     version="1.0.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.on_event("startup")
-def startup_event():
-    """Initialisation QGIS au démarrage du serveur."""
+async def startup_event():
     logger.info("Démarrage API - initialisation QGIS...")
     success, err = initialize_qgis_if_needed()
     if not success:
         logger.error("Échec de l'initialisation QGIS au démarrage: %s", err)
     else:
         logger.info("QGIS prêt")
-
+    asyncio.create_task(periodic_cleanup())
 
 @app.on_event("shutdown")
 def shutdown_event():
-    """Nettoyage à l'arrêt du serveur."""
     logger.info("Arrêt API - nettoyage QGIS et sessions...")
     try:
-        cleanup_expired_sessions(max_age_hours=0)  # tout nettoyer maintenant
+        cleanup_expired_sessions(max_age_hours=0)
     except Exception:
         logger.exception("Erreur nettoyage sessions au shutdown")
     try:
@@ -350,332 +619,1047 @@ def shutdown_event():
     except Exception:
         logger.exception("Erreur cleanup qgis_manager au shutdown")
 
-
 # ---------- Endpoints ----------
-@app.get("/")
-def root():
-    manager = get_qgis_manager()
-    qgis_ok = manager.is_initialized()
-    return {"message": "API QGIS Headless", "version": "1.0.0", "qgis_initialized": qgis_ok}
-
-
 @app.get("/healthz")
-def health():
+def ping():
     manager = get_qgis_manager()
-    return {
-        "status": "healthy" if manager.is_initialized() else "degraded",
-        "qgis_initialized": manager.is_initialized(),
-        "init_errors": manager.get_errors()[:5]
-    }
+    return standard_response(
+        success=True,
+        data={
+            'status': 'ok',
+            'service': 'FlashCroquis API',
+            'version': '1.0.0',
+            'qgis_initialized': manager.is_initialized(),
+            'uptime': datetime.utcnow().isoformat()
+        },
+        message="Service en ligne et opérationnel"
+    )
 
-
-@app.post("/sessions", status_code=201)
-def create_session():
-    session, created = get_project_session()
-    return {"session_id": session.session_id, "created": created}
-
-
-@app.post("/layers/upload")
-async def upload_layer(file: UploadFile = File(...), session_id: Optional[str] = None):
-    """
-    Téléverser un fichier et tenter de le charger comme couche (vectorielle ou raster).
-    Retourne des métadonnées sur la couche ou une erreur.
-    """
-    manager = get_qgis_manager()
-    if not manager.is_initialized():
-        raise HTTPException(status_code=503, detail="QGIS not initialized")
-
-    classes = manager.get_classes()
-    QgsVectorLayer = classes['QgsVectorLayer']
-    QgsRasterLayer = classes['QgsRasterLayer']
-    QgsProject = classes['QgsProject']
-
-    # récupérer ou créer une session
-    session, _ = get_project_session(session_id)
-
-    # sauvegarder fichier temporaire
-    suffix = Path(file.filename).suffix or ""
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
+@app.get("/qgis/info")
+def qgis_info():
     try:
-        content = await file.read()
-        with open(tmp_path, "wb") as f:
-            f.write(content)
-        session.add_temp_file(tmp_path)
+        manager = get_qgis_manager()
+        if not manager.is_initialized():
+            success, error = manager.initialize()
+            if not success:
+                return JSONResponse(
+                    status_code=500,
+                    content=standard_response(
+                        success=False,
+                        error=error,
+                        message="Échec de l'initialisation de QGIS"
+                    )
+                )
 
-        # tenter comme couche vecteur
-        layer = QgsVectorLayer(tmp_path, file.filename, "ogr")
-        layer_type = "vector"
-        if not layer.isValid():
-            # essayer raster
-            layer = QgsRasterLayer(tmp_path, file.filename)
-            layer_type = "raster" if layer.isValid() else "unknown"
-
-        if not layer.isValid():
-            # supprimer le fichier temporaire
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
-            raise HTTPException(status_code=400, detail="Format de fichier non supporté ou couche invalide")
-
-        # ajouter au projet de la session (si possible)
-        try:
-            pr = session.get_project(QgsProject)
-            # certains projets QGIS utilisent instance(), mais on garde local
-            try:
-                pr.addMapLayer(layer)
-            except Exception:
-                # fallback: tenter QgsProject.instance()
-                try:
-                    QgsProject.instance().addMapLayer(layer)
-                except Exception:
-                    logger.debug("Impossible d'ajouter la couche au projet de session")
-        except Exception:
-            logger.debug("Impossible de récupérer ou utiliser QgsProject pour la session")
+        classes = manager.get_classes()
+        QgsApplicationClass = classes['QgsApplication']
+        Qgis = classes['Qgis']
 
         info = {
-            "message": "Couche chargée avec succès",
-            "layer_name": layer.name(),
-            "type": layer_type
+            'qgis_version': Qgis.QGIS_VERSION,
+            'qgis_version_int': Qgis.QGIS_VERSION_INT,
+            'qgis_version_name': Qgis.QGIS_RELEASE_NAME,
+            'status': 'initialized' if QgsApplicationClass.instance() else 'partially_initialized',
+            'algorithms_count': len(QgsApplicationClass.processingRegistry().algorithms()) if hasattr(QgsApplicationClass, 'processingRegistry') and QgsApplicationClass.instance() else 0,
+            'providers_count': len(QgsApplicationClass.processingRegistry().providers()) if hasattr(QgsApplicationClass, 'processingRegistry') and QgsApplicationClass.instance() else 0,
+            'processing_available': hasattr(classes['processing'], 'run'),
+            'initialization_time': datetime.utcnow().isoformat()
         }
-        # si vecteur, compter features (peut être coûteux)
-        try:
-            if layer_type == "vector":
-                info["feature_count"] = layer.featureCount()
-        except Exception:
-            logger.debug("Impossible de compter les features (peut dépendre du provider)")
 
-        return info
-
-    except HTTPException:
-        raise
+        return standard_response(
+            success=True,
+            data=info,
+            message="Informations QGIS récupérées avec succès"
+        )
     except Exception as e:
-        logger.exception("Erreur upload_layer")
-        raise HTTPException(status_code=500, detail=str(e))
+        return handle_exception(e, "qgis_info", "Impossible de récupérer les informations QGIS")
 
-
-@app.get("/layers", response_model=List[LayerInfo])
-def get_layers(session_id: Optional[str] = None):
-    """
-    Lister les couches du projet de la session (ou de l'instance globale si aucun projet de session).
-    """
-    manager = get_qgis_manager()
-    if not manager.is_initialized():
-        raise HTTPException(status_code=503, detail="QGIS not initialized")
-    classes = manager.get_classes()
-    QgsProject = classes['QgsProject']
-    QgsVectorLayer = classes['QgsVectorLayer']
-
-    session, _ = get_project_session(session_id)
+@app.post("/project/create")
+def create_project(request: CreateProjectRequest):
     try:
-        proj = session.get_project(QgsProject)
-        layers_dict = {}
-        # essayer mapLayers si disponible
-        try:
-            layers_map = proj.mapLayers()
-            if layers_map:
-                layers_dict = layers_map
-        except Exception:
-            try:
-                layers_dict = QgsProject.instance().mapLayers()
-            except Exception:
-                layers_dict = {}
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        session, created = get_project_session(request.session_id)
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        project.clear()
+        project.setTitle(request.title)
+
+        if request.crs:
+            from qgis.core import QgsCoordinateReferenceSystem
+            crs = QgsCoordinateReferenceSystem(request.crs)
+            if crs.isValid():
+                project.setCrs(crs)
 
         layers_info = []
-        for layer_id, layer in layers_dict.items():
-            try:
-                extent = layer.extent()
-                info = LayerInfo(
-                    name=layer.name(),
-                    type="vector" if isinstance(layer, QgsVectorLayer) else "raster",
-                    crs=layer.crs().authid() if hasattr(layer, "crs") else "UNKNOWN",
-                    extent=[
-                        extent.xMinimum(), extent.yMinimum(),
-                        extent.xMaximum(), extent.yMaximum()
-                    ],
-                    feature_count=layer.featureCount() if isinstance(layer, QgsVectorLayer) else None
-                )
-                layers_info.append(info)
-            except Exception:
-                logger.debug(f"Impossible d'extraire les informations layer {layer_id}")
+        for layer_id, layer in project.mapLayers().items():
+            layers_info.append(format_layer_info(layer))
 
-        return layers_info
+        project_info = {
+            'title': project.title(),
+            'file_name': project.fileName(),
+            'crs': project.crs().authid() if project.crs() else None,
+            'layers': layers_info,
+            'layers_count': len(layers_info),
+            'session_id': session.session_id,
+            'created_at': session.created_at.isoformat()
+        }
+
+        return standard_response(
+            success=True,
+            data=project_info,
+            message=f"Projet '{request.title}' créé avec succès"
+        )
     except Exception as e:
-        logger.exception("Erreur get_layers")
-        raise HTTPException(status_code=500, detail=str(e))
+        return handle_exception(e, "create_project", "Impossible de créer le projet")
 
-
-@app.post("/map/render")
-def render_map(request: MapRequest):
-    """
-    Rendu de carte minimal basé sur les couches demandées.
-    Retourne une image (PNG par défaut).
-    """
-    manager = get_qgis_manager()
-    if not manager.is_initialized():
-        raise HTTPException(status_code=503, detail="QGIS not initialized")
-    classes = manager.get_classes()
-
-    QgsMapSettings = classes['QgsMapSettings']
-    QgsRectangle = classes['QgsRectangle']
-    QgsMapRendererParallelJob = classes['QgsMapRendererParallelJob']
-    QgsCoordinateReferenceSystem = None
-    QgsSize = None
-
-    # Certaines classes peuvent être absentes selon la version : on utilise des alternatives minimales
+@app.post("/project/load")
+def load_project(request: LoadProjectRequest):
     try:
-        # import CRS/Size si présents
-        from qgis.core import QgsCoordinateReferenceSystem, QgsUnitTypes, QgsSize  # type: ignore
-    except Exception:
-        pass
+        if not request.project_path:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="Le chemin du projet est requis"))
 
-    # Récupérer couches
+        if not os.path.exists(request.project_path):
+            return JSONResponse(status_code=404, content=standard_response(success=False, message=f"Fichier projet non trouvé : {request.project_path}"))
+
+        if not request.project_path.lower().endswith(('.qgs', '.qgz')):
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="Le fichier doit être au format .qgs ou .qgz"))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        session, session_created = get_project_session(request.session_id)
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        success_load = project.read(request.project_path)
+
+        if not success_load:
+            return JSONResponse(status_code=500, content=standard_response(success=False, message="Échec du chargement du projet"))
+
+        layers_info = []
+        for layer_id, layer in project.mapLayers().items():
+            layers_info.append(format_layer_info(layer))
+
+        project_info = {
+            'title': project.title(),
+            'file_name': project.fileName(),
+            'crs': project.crs().authid() if project.crs() else None,
+            'layers': layers_info,
+            'layers_count': len(layers_info),
+            'loaded_at': datetime.utcnow().isoformat()
+        }
+
+        return standard_response(
+            success=True,
+            data=project_info,
+            message=f"Projet chargé avec succès depuis {os.path.basename(request.project_path)}",
+            metadata={
+                'session_id': session.session_id,
+                'session_newly_created': session_created,
+                'file_size': os.path.getsize(request.project_path)
+            }
+        )
+    except Exception as e:
+        return handle_exception(e, "load_project", "Impossible de charger le projet")
+
+@app.get("/project/info")
+def project_info(session_id: str = Query(..., description="ID de session")):
     try:
-        session, _ = get_project_session(request.session_id)
-        proj = session.get_project(classes['QgsProject'])
-        # assembler layers par nom
-        layers = []
-        try:
-            layers_map = proj.mapLayers()
-            for ln in request.layers:
-                for lid, layer in layers_map.items():
-                    if layer.name() == ln:
-                        layers.append(layer)
-        except Exception:
-            # fallback: parcourir project instance
-            try:
-                layers_map = classes['QgsProject'].instance().mapLayers()
-                for ln in request.layers:
-                    for lid, layer in layers_map.items():
-                        if layer.name() == ln:
-                            layers.append(layer)
-            except Exception:
-                pass
+        if not session_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
 
-        if not layers:
-            raise HTTPException(status_code=400, detail="Aucune couche trouvée pour les noms fournis")
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
 
-        settings = QgsMapSettings()
-        settings.setOutputSize([request.width, request.height])
-        settings.setLayers(layers)
+        with project_sessions_lock:
+            session = project_sessions.get(session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
 
-        if request.extent:
-            extent = QgsRectangle(*request.extent)
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        layers_info = []
+        for layer_id, layer in project.mapLayers().items():
+            layers_info.append(format_layer_info(layer))
+
+        project_info = {
+            'title': project.title(),
+            'file_name': project.fileName(),
+            'crs': project.crs().authid() if project.crs() else None,
+            'layers': layers_info,
+            'layers_count': len(layers_info),
+            'session_id': session.session_id,
+            'session_created_at': session.created_at.isoformat(),
+            'session_last_accessed': session.last_accessed.isoformat()
+        }
+
+        return standard_response(
+            success=True,
+            data=project_info,
+            message=f"Informations du projet récupérées ({project_info['layers_count']} couches)"
+        )
+    except Exception as e:
+        return handle_exception(e, "project_info", "Impossible de récupérer les informations du projet")
+
+ALLOWED_EXTENSIONS = {'.shp', '.geojson', '.gpkg', '.tif', '.tiff', '.vrt', '.kml', '.kmz', '.zip', '.gpx', '.csv'}
+
+@app.post("/layers/vector/add")
+async def add_vector_layer(request: AddVectorLayerRequest, background_tasks: BackgroundTasks):
+    try:
+        if not request.data_source:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="La source de données est requise"))
+        if not request.session_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
+
+        file_ext = Path(request.data_source).suffix.lower()
+        if file_ext not in ALLOWED_EXTENSIONS:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message=f"Extension non supportée: {file_ext}"))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsVectorLayer = classes['QgsVectorLayer']
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+
+        # Déterminer le provider
+        if file_ext == '.shp':
+            provider = 'ogr'
+            layer = QgsVectorLayer(request.data_source, 'input_layer', provider)
+        elif file_ext == '.gpx':
+            provider = 'gpx'
+            layer = QgsVectorLayer(f"{request.data_source}?type=track", 'input_layer', provider)
+        elif file_ext == '.csv':
+            provider = 'delimitedtext'
+            uri = f"file:///{request.data_source}?delimiter=;&xField=X&yField=Y"
+            layer = QgsVectorLayer(uri, 'input_layer', provider)
         else:
-            extent = QgsRectangle()
-            for layer in layers:
-                try:
-                    extent.combineExtentWith(layer.extent())
-                except Exception:
-                    pass
-        settings.setExtent(extent)
+            layer = QgsVectorLayer(request.data_source, request.layer_name, "ogr")
 
-        # Output file
-        fd, out_path = tempfile.mkstemp(suffix=f".{request.format.lower()}")
-        os.close(fd)
+        if not layer.isValid():
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="Échec du chargement de la couche"))
 
-        # Créer et lancer job de rendu
-        render = QgsMapRendererParallelJob(settings)
-        render.start()
-        render.waitForFinished()
-        img = render.renderedImage()
+        if request.is_parcelle:
+            polygon_layer, points_layer = create_polygon_with_vertex_points(layer, request.output_polygon_layer, request.output_points_layer)
 
-        # Sauvegarder
-        saved = img.save(out_path)
-        if not saved:
-            logger.warning("Enregistrement de l'image a échoué via QImage.save, essaie fallback PIL")
-            try:
-                # fallback: convertir via bytes si possible (optionnel)
-                from PIL import Image  # type: ignore
-                # attempt to export via layout exporter could be implemented if needed
-            except Exception:
-                logger.debug("PIL non disponible pour fallback d'enregistrement")
+            label_settings = classes['QgsPalLayerSettings']()
+            label_settings.fieldName = request.label_field
+            label_settings.placement = classes['QgsPalLayerSettings'].AroundPoint
 
-        return FileResponse(out_path, media_type=f"image/{request.format.lower()}", filename=f"map.{request.format.lower()}")
+            text_format = classes['QgsTextFormat']()
+            color = QColor(request.label_color)
+            if color.isValid():
+                text_format.setColor(color)
+            text_format.setSize(request.label_size)
+            label_settings.setFormat(text_format)
+            label_settings.xOffset = request.label_offset_x
+            label_settings.yOffset = request.label_offset_y
 
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception("Erreur render_map")
-        raise HTTPException(status_code=500, detail="Erreur interne lors du rendu")
+            points_layer.setLabeling(classes['QgsVectorLayerSimpleLabeling'](label_settings))
+            points_layer.setLabelsEnabled(request.enable_point_labels)
+            points_layer.triggerRepaint()
 
+            project.addMapLayer(polygon_layer)
+            project.addMapLayer(points_layer)
+
+            polygon_info = format_layer_info(polygon_layer)
+            points_info = format_layer_info(points_layer)
+
+            return standard_response(
+                success=True,
+                data={"Parcelle": polygon_info, "Points sommets": points_info},
+                message="Couches vectorielles Parcelle et Points sommets ajoutées avec succès"
+            )
+        else:
+            project.addMapLayer(layer)
+            layer_info = format_layer_info(layer)
+            return standard_response(
+                success=True,
+                data=layer_info,
+                message=f"Couche vectorielle '{request.layer_name}' ajoutée avec succès ({layer_info.get('feature_count', 0)} entités)"
+            )
+
+    except Exception as e:
+        return handle_exception(e, "add_vector_layer", "Impossible d'ajouter la couche vectorielle")
+
+@app.post("/layers/raster/add")
+def add_raster_layer(request: AddRasterLayerRequest):
+    try:
+        if not request.data_source:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="La source de données est requise"))
+        if not request.session_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsRasterLayer = classes['QgsRasterLayer']
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        layer = QgsRasterLayer(request.data_source, request.layer_name)
+
+        if not layer.isValid():
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="Échec du chargement de la couche raster"))
+
+        project.addMapLayer(layer)
+        layer_info = format_layer_info(layer)
+
+        return standard_response(
+            success=True,
+            data=layer_info,
+            message=f"Couche raster '{request.layer_name}' ajoutée avec succès ({layer_info.get('bands', 0)} bandes)"
+        )
+    except Exception as e:
+        return handle_exception(e, "add_raster_layer", "Impossible d'ajouter la couche raster")
+
+@app.get("/layers/list")
+def get_layers(session_id: str = Query(..., description="ID de session")):
+    try:
+        if not session_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        layers = []
+        vector_count = 0
+        raster_count = 0
+
+        for layer_id, layer in project.mapLayers().items():
+            layer_info = format_layer_info(layer)
+            if layer_info['type'] == 'vector':
+                vector_count += 1
+            elif layer_info['type'] == 'raster':
+                raster_count += 1
+            layers.append(layer_info)
+
+        layers.sort(key=lambda x: x['name'].lower())
+
+        return standard_response(
+            success=True,
+            data={
+                'layers': layers,
+                'total_count': len(layers),
+                'summary': {
+                    'vector_layers': vector_count,
+                    'raster_layers': raster_count,
+                    'total_layers': len(layers)
+                },
+                'session_id': session_id
+            },
+            message=f"{len(layers)} couches récupérées"
+        )
+    except Exception as e:
+        return handle_exception(e, "get_layers", "Impossible de récupérer la liste des couches")
+
+@app.post("/project/save")
+def save_project(request: SaveProjectRequest):
+    try:
+        if not request.session_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
+
+        if not request.project_path:
+            path_dir = os.path.join(Path.home(), 'Documents', 'DocsFlashCroquis')
+            request.project_path = os.path.join(path_dir, f'{request.session_id}.qgs')
+
+        os.makedirs(os.path.dirname(request.project_path), exist_ok=True)
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        success_save = project.write(request.project_path)
+
+        if not success_save:
+            return JSONResponse(status_code=500, content=standard_response(success=False, message="Échec de la sauvegarde du projet"))
+
+        file_size = os.path.getsize(request.project_path) if os.path.exists(request.project_path) else 0
+
+        return standard_response(
+            success=True,
+            data={
+                'project_path': request.project_path,
+                'file_size': file_size,
+                'file_size_formatted': f"{file_size / 1024 / 1024:.2f} MB" if file_size > 0 else "0 MB",
+                'session_id': request.session_id
+            },
+            message=f"Projet sauvegardé avec succès dans {os.path.basename(request.project_path)}"
+        )
+    except Exception as e:
+        return handle_exception(e, "save_project", "Impossible de sauvegarder le projet")
+
+@app.post("/layers/remove")
+def remove_layer(request: RemoveLayerRequest):
+    try:
+        if not request.layer_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'ID de la couche est requis"))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        layer = project.mapLayer(request.layer_id)
+
+        if not layer:
+            return JSONResponse(status_code=404, content=standard_response(success=False, message=f"Couche avec ID '{request.layer_id}' non trouvée"))
+
+        layer_name = layer.name()
+        layer_type = 'vector' if layer.type() == 0 else 'raster' if layer.type() == 1 else 'unknown'
+        project.removeMapLayer(request.layer_id)
+
+        return standard_response(
+            success=True,
+            message=f"Couche '{layer_name}' ({layer_type}) supprimée avec succès",
+            metadata={
+                'session_id': request.session_id,
+                'deleted_layer_id': request.layer_id,
+                'deleted_layer_name': layer_name,
+                'layer_type': layer_type
+            }
+        )
+    except Exception as e:
+        return handle_exception(e, "remove_layer", "Impossible de supprimer la couche")
+
+@app.post("/layers/zoom")
+def zoom_to_layer(request: ZoomToLayerRequest):
+    try:
+        if not request.layer_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'ID de la couche est requis"))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        layer = project.mapLayer(request.layer_id)
+
+        if not layer:
+            return JSONResponse(status_code=404, content=standard_response(success=False, message=f"Couche avec ID '{request.layer_id}' non trouvée"))
+
+        extent = layer.extent()
+        width = extent.xMaximum() - extent.xMinimum()
+        height = extent.yMaximum() - extent.yMinimum()
+
+        extent_info = {
+            'xmin': round(extent.xMinimum(), 6),
+            'ymin': round(extent.yMinimum(), 6),
+            'xmax': round(extent.xMaximum(), 6),
+            'ymax': round(extent.yMaximum(), 6),
+            'center': {
+                'x': round((extent.xMinimum() + extent.xMaximum()) / 2, 6),
+                'y': round((extent.yMinimum() + extent.yMaximum()) / 2, 6)
+            },
+            'dimensions': {
+                'width': round(width, 6),
+                'height': round(height, 6)
+            },
+            'area': round(width * height, 6) if width > 0 and height > 0 else 0
+        }
+
+        return standard_response(
+            success=True,
+            data=extent_info,
+            message=f"Étendue de la couche '{layer.name()}' récupérée",
+            metadata={
+                'session_id': request.session_id,
+                'layer_name': layer.name(),
+                'layer_id': request.layer_id,
+                'coordinate_system': layer.crs().authid() if layer.crs() else None
+            }
+        )
+    except Exception as e:
+        return handle_exception(e, "zoom_to_layer", "Impossible de récupérer l'étendue de la couche")
+
+@app.get("/layers/{layer_id}/features")
+def get_layer_features(
+    layer_id: str = FastPath(..., description="ID de la couche"),
+    session_id: str = Query(..., description="ID de session"),
+    limit: int = Query(100, description="Nombre maximum de features"),
+    offset: int = Query(0, description="Décalage pour la pagination"),
+    attributes_only: bool = Query(False, description="Retourner uniquement les attributs")
+):
+    try:
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+
+        project = session.get_project(QgsProject)
+        layer = project.mapLayer(layer_id)
+
+        if not layer:
+            return JSONResponse(status_code=404, content=standard_response(success=False, message=f"Couche avec ID '{layer_id}' non trouvée"))
+
+        if layer.type() != 0:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="Cette opération n'est disponible que pour les couches vectorielles"))
+
+        features_data = []
+        total_features = layer.featureCount()
+        request_features = min(limit, total_features - offset)
+
+        for i, feature in enumerate(layer.getFeatures()):
+            if i < offset:
+                continue
+            if len(features_data) >= request_features:
+                break
+
+            feature_data = {'id': feature.id(), 'attributes': {}}
+            for field in layer.fields():
+                feature_data['attributes'][field.name()] = feature[field.name()]
+
+            if not attributes_only and feature.geometry():
+                geom = feature.geometry()
+                feature_data['geometry'] = {
+                    'type': str(geom.type()),
+                    'wkt': geom.asWkt()[:500] + '...' if len(geom.asWkt()) > 500 else geom.asWkt(),
+                    'centroid': {
+                        'x': geom.centroid().asPoint().x() if geom.centroid() else None,
+                        'y': geom.centroid().asPoint().y() if geom.centroid() else None
+                    } if geom.type() == 0 else None
+                }
+
+            features_data.append(feature_data)
+
+        result = {
+            'layer_id': layer_id,
+            'layer_name': layer.name(),
+            'total_features': total_features,
+            'requested_features': len(features_data),
+            'offset': offset,
+            'limit': limit,
+            'has_more': offset + len(features_data) < total_features,
+            'features': features_data
+        }
+
+        return standard_response(
+            success=True,
+            data=result,
+            message=f"{len(features_data)} features récupérés sur {total_features} au total",
+            metadata={
+                'session_id': session_id,
+                'pagination': {
+                    'current_page': (offset // limit) + 1,
+                    'total_pages': (total_features + limit - 1) // limit,
+                    'per_page': limit
+                },
+                'fields_count': len(layer.fields())
+            }
+        )
+    except Exception as e:
+        return handle_exception(e, "get_layer_features", "Impossible de récupérer les features de la couche")
 
 @app.post("/processing/run")
-def run_processing(req: ProcessingRequest):
-    """
-    Exécuter un algorithme de processing par son id.
-    """
-    manager = get_qgis_manager()
-    if not manager.is_initialized():
-        raise HTTPException(status_code=503, detail="QGIS not initialized")
-
-    classes = manager.get_classes()
-    processing = classes.get('processing')
-    QgsProcessingFeedback = classes.get('QgsProcessingFeedback')
-
-    if processing is None:
-        raise HTTPException(status_code=501, detail="Processing module is not available in this environment")
-
-    # Vérifier existence algorithm (si registry disponible)
+def execute_processing(request: ExecuteProcessingRequest):
     try:
-        from qgis.core import QgsApplication  # type: ignore
-        registry = QgsApplication.processingRegistry()
-        if not registry.algorithmById(req.algorithm):
-            raise HTTPException(status_code=400, detail=f"Algorithme non trouvé: {req.algorithm}")
-    except HTTPException:
-        raise
-    except Exception:
-        logger.debug("Impossible d'interroger processing registry ; on essaye quand même d'exécuter")
+        if not request.algorithm:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="Le nom de l'algorithme est requis"))
 
-    try:
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsApplication = classes['QgsApplication']
+        QgsProcessingContext = classes['QgsProcessingContext']
+        QgsProcessingFeedback = classes['QgsProcessingFeedback']
+        processing = classes['processing']
+
+        alg = QgsApplication.processingRegistry().algorithmById(request.algorithm)
+        if not alg:
+            return JSONResponse(status_code=404, content=standard_response(success=False, message=f"Algorithme '{request.algorithm}' non trouvé"))
+
+        context = QgsProcessingContext()
         feedback = QgsProcessingFeedback()
-    except Exception:
-        feedback = None
+        results = processing.run(request.algorithm, request.parameters, context=context, feedback=feedback)
 
-    try:
-        result = processing.run(req.algorithm, req.parameters, feedback=feedback)
-        return {"result": result}
+        formatted_results = results if request.output_format == 'json' else {
+            'outputs_count': len(results),
+            'outputs_summary': {k: type(v).__name__ for k, v in results.items()}
+        }
+
+        return standard_response(
+            success=True,
+            data={
+                'algorithm': request.algorithm,
+                'algorithm_name': alg.displayName(),
+                'parameters': request.parameters,
+                'results': formatted_results,
+                'execution_time': datetime.utcnow().isoformat()
+            },
+            message=f"Algorithme '{alg.displayName()}' exécuté avec succès"
+        )
     except Exception as e:
-        logger.exception("Erreur lors de l'exécution processing")
-        raise HTTPException(status_code=500, detail=str(e))
+        return handle_exception(e, "execute_processing", "Impossible d'exécuter l'algorithme de traitement")
 
-
-@app.get("/processing/algorithms")
-def get_algorithms():
-    manager = get_qgis_manager()
-    if not manager.is_initialized():
-        raise HTTPException(status_code=503, detail="QGIS not initialized")
-
+@app.get("/map/render")
+def render_map(request: MapRequest, background_tasks: BackgroundTasks):
     try:
-        from qgis.core import QgsApplication  # type: ignore
-        registry = QgsApplication.processingRegistry()
-        algorithms = []
-        for provider in registry.providers():
-            for alg in provider.algorithms():
-                algorithms.append({
-                    "id": alg.id(),
-                    "name": alg.displayName(),
-                    "group": alg.group(),
-                    "provider": provider.name()
-                })
-        return algorithms
-    except Exception:
-        logger.exception("Erreur get_algorithms")
-        raise HTTPException(status_code=500, detail="Impossible de lister les algorithmes")
+        if not request.session_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
 
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+        QgsMapSettings = classes['QgsMapSettings']
+        QgsMapRendererParallelJob = classes['QgsMapRendererParallelJob']
+        QgsRectangle = classes['QgsRectangle']
+
+        project = session.get_project(QgsProject)
+        map_settings = QgsMapSettings()
+        map_settings.setOutputSize(QSize(request.width, request.height))
+        map_settings.setOutputDpi(request.dpi)
+
+        if project.crs().isValid():
+            map_settings.setDestinationCrs(project.crs())
+
+        extent = None
+        if request.bbox:
+            coords = [float(x) for x in request.bbox.split(',')]
+            if len(coords) == 4:
+                extent = QgsRectangle(coords[0], coords[1], coords[2], coords[3])
+            else:
+                return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format bbox doit être: xmin,ymin,xmax,ymax"))
+
+        if extent:
+            map_settings.setExtent(extent)
+        else:
+            project_extent = QgsRectangle()
+            project_extent.setMinimal()
+            visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid() and not layer.extent().isEmpty()]
+            for layer in visible_layers:
+                if project_extent.isEmpty():
+                    project_extent = QgsRectangle(layer.extent())
+                else:
+                    project_extent.combineExtentWith(layer.extent())
+
+            if not project_extent.isEmpty() and visible_layers:
+                if request.scale:
+                    try:
+                        scale_value = float(request.scale)
+                        if scale_value > 0:
+                            center_x = (project_extent.xMinimum() + project_extent.xMaximum()) / 2
+                            center_y = (project_extent.yMinimum() + project_extent.yMaximum()) / 2
+                            map_units_per_pixel = scale_value / (request.dpi * 0.0254)
+                            new_width = request.width * map_units_per_pixel
+                            new_height = request.height * map_units_per_pixel
+                            new_extent = QgsRectangle(
+                                center_x - new_width/2,
+                                center_y - new_height/2,
+                                center_x + new_width/2,
+                                center_y + new_height/2
+                            )
+                            map_settings.setExtent(new_extent)
+                        else:
+                            map_settings.setExtent(project_extent)
+                    except ValueError:
+                        map_settings.setExtent(project_extent)
+                else:
+                    margin = 0.05
+                    width_margin = (project_extent.xMaximum() - project_extent.xMinimum()) * margin
+                    height_margin = (project_extent.yMaximum() - project_extent.yMinimum()) * margin
+                    extended_extent = QgsRectangle(
+                        project_extent.xMinimum() - width_margin,
+                        project_extent.yMinimum() - height_margin,
+                        project_extent.xMaximum() + width_margin,
+                        project_extent.yMaximum() + height_margin
+                    )
+                    map_settings.setExtent(extended_extent)
+            else:
+                default_extent = QgsRectangle(-180, -90, 180, 90)
+                map_settings.setExtent(default_extent)
+
+        visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
+        map_settings.setLayers(visible_layers)
+
+        if request.background != 'transparent':
+            color = QColor(request.background)
+            if color.isValid():
+                map_settings.setBackgroundColor(color)
+            else:
+                map_settings.setBackgroundColor(QColor(255, 255, 255))
+        else:
+            map_settings.setBackgroundColor(QColor(0, 0, 0, 0))
+
+        map_settings.setFlag(QgsMapSettings.Antialiasing, True)
+        map_settings.setFlag(QgsMapSettings.DrawLabeling, True)
+        map_settings.setFlag(QgsMapSettings.UseAdvancedEffects, True)
+
+        image_format = QImage.Format_ARGB32 if request.background == 'transparent' and request.format_image == ImageFormat.png else QImage.Format_RGB32
+        image = QImage(request.width, request.height, image_format)
+
+        if request.background == 'transparent' and request.format_image == ImageFormat.png:
+            image.fill(0)
+        else:
+            color = QColor(request.background) if request.background != 'transparent' else QColor(255, 255, 255)
+            image.fill(color if color.isValid() else QColor(255, 255, 255))
+
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+
+        job = QgsMapRendererParallelJob(map_settings)
+        job.start()
+        job.waitForFinished()
+        rendered_image = job.renderedImage()
+        painter.drawImage(0, 0, rendered_image)
+
+        extent_map = map_settings.extent()
+
+        if request.show_grid:
+            grid_qcolor = QColor(request.grid_color)
+            if not grid_qcolor.isValid():
+                grid_qcolor = QColor(0, 0, 255)
+
+            painter.setPen(QPen(grid_qcolor, request.grid_width))
+            painter.setFont(QFont('Arial', request.grid_label_font_size))
+
+            x_min = extent_map.xMinimum()
+            x_max = extent_map.xMaximum()
+            y_min = extent_map.yMinimum()
+            y_max = extent_map.yMaximum()
+
+            x_start = (x_min // request.grid_spacing) * request.grid_spacing
+            x_lines = []
+            x = x_start
+            while x <= x_max:
+                if x >= x_min:
+                    x_lines.append(x)
+                x += request.grid_spacing
+
+            y_start = (y_min // request.grid_spacing) * request.grid_spacing
+            y_lines = []
+            y = y_start
+            while y <= y_max:
+                if y >= y_min:
+                    y_lines.append(y)
+                y += request.grid_spacing
+
+            if request.grid_type == GridType.lines:
+                for x in x_lines:
+                    x_pixel = int(((x - x_min) / (x_max - x_min)) * request.width)
+                    painter.drawLine(x_pixel, 0, x_pixel, request.height)
+                for y in y_lines:
+                    y_pixel = int((1 - (y - y_min) / (y_max - y_min)) * request.height)
+                    painter.drawLine(0, y_pixel, request.width, y_pixel)
+            elif request.grid_type == GridType.dots:
+                painter.setPen(QPen(grid_qcolor, request.grid_width * 2))
+                for x in x_lines:
+                    x_pixel = int(((x - x_min) / (x_max - x_min)) * request.width)
+                    for y in y_lines:
+                        y_pixel = int((1 - (y - y_min) / (y_max - y_min)) * request.height)
+                        painter.drawPoint(x_pixel, y_pixel)
+            elif request.grid_type == GridType.crosses:
+                cross_size = request.grid_size
+                for x in x_lines:
+                    x_pixel = int(((x - x_min) / (x_max - x_min)) * request.width)
+                    for y in y_lines:
+                        y_pixel = int((1 - (y - y_min) / (y_max - y_min)) * request.height)
+                        painter.drawLine(x_pixel - cross_size, y_pixel, x_pixel + cross_size, y_pixel)
+                        painter.drawLine(x_pixel, y_pixel - cross_size, x_pixel, y_pixel + cross_size)
+
+            if request.grid_labels:
+                painter.setPen(QPen(grid_qcolor, 1))
+                painter.setFont(QFont('Arial', request.grid_label_font_size))
+
+                if request.grid_vertical_labels:
+                    for j, y in enumerate(y_lines):
+                        y_pixel = int((1 - (y - y_min) / (y_max - y_min)) * request.height)
+                        show_label = False
+                        if request.grid_label_position == LabelPosition.corners:
+                            if j == 0 or j == len(y_lines) - 1:
+                                show_label = True
+                        elif request.grid_label_position == LabelPosition.edges:
+                            if j == 0 or j == len(y_lines) - 1:
+                                show_label = True
+                        else:
+                            show_label = True
+
+                        if show_label:
+                            label = f"{y:.2f}°"
+                            painter.save()
+                            painter.translate(10, y_pixel + request.grid_label_font_size//2)
+                            painter.rotate(-90)
+                            painter.drawText(0, 0, label)
+                            painter.restore()
+
+                            painter.save()
+                            painter.translate(request.width - request.grid_label_font_size, y_pixel + request.grid_label_font_size//2)
+                            painter.rotate(-90)
+                            painter.drawText(0, 0, label)
+                            painter.restore()
+
+                for i, x in enumerate(x_lines):
+                    x_pixel = int(((x - x_min) / (x_max - x_min)) * request.width)
+                    show_label = False
+                    if request.grid_label_position == LabelPosition.corners:
+                        if i == 0 or i == len(x_lines) - 1:
+                            show_label = True
+                    elif request.grid_label_position == LabelPosition.edges:
+                        if i == 0 or i == len(x_lines) - 1:
+                            show_label = True
+                    else:
+                        show_label = True
+
+                    if show_label:
+                        label = f"{x:.2f}°"
+                        painter.drawText(x_pixel + 5, request.grid_label_font_size + 5, label)
+                        painter.drawText(x_pixel + 5, request.height - 5, label)
+
+        if request.show_points:
+            try:
+                points_data = json.loads(request.show_points)
+                geo_points = []
+                if isinstance(points_data, list):
+                    for point_item in points_data:
+                        if isinstance(point_item, dict) and 'x' in point_item and 'y' in point_item:
+                            point_info = {
+                                'x': float(point_item['x']),
+                                'y': float(point_item['y']),
+                                'label': point_item.get('label', ''),
+                                'color': point_item.get('color', request.points_color),
+                                'size': point_item.get('size', request.points_size)
+                            }
+                            geo_points.append(point_info)
+                        elif isinstance(point_item, list) and len(point_item) >= 2:
+                            point_info = {
+                                'x': float(point_item[0]),
+                                'y': float(point_item[1]),
+                                'label': str(point_item[2]) if len(point_item) > 2 else '',
+                                'color': request.points_color,
+                                'size': request.points_size
+                            }
+                            geo_points.append(point_info)
+
+                map_width = extent_map.xMaximum() - extent_map.xMinimum()
+                map_height = extent_map.yMaximum() - extent_map.yMinimum()
+
+                for point_info in geo_points:
+                    x_geo = point_info['x']
+                    y_geo = point_info['y']
+                    if extent_map.xMinimum() <= x_geo <= extent_map.xMaximum() and extent_map.yMinimum() <= y_geo <= extent_map.yMaximum():
+                        x_pixel = int(((x_geo - extent_map.xMinimum()) / map_width) * request.width)
+                        y_pixel = int((1 - (y_geo - extent_map.yMinimum()) / map_height) * request.height)
+
+                        point_color = QColor(point_info['color'])
+                        if not point_color.isValid():
+                            point_color = QColor(255, 0, 0)
+
+                        painter.setPen(QPen(point_color, 2))
+                        painter.setBrush(QBrush(point_color))
+
+                        size = point_info['size']
+                        if request.points_style == 'square':
+                            painter.drawRect(x_pixel - size//2, y_pixel - size//2, size, size)
+                        elif request.points_style == 'triangle':
+                            points_array = [
+                                QPoint(x_pixel, y_pixel - size//2),
+                                QPoint(x_pixel - size//2, y_pixel + size//2),
+                                QPoint(x_pixel + size//2, y_pixel + size//2)
+                            ]
+                            painter.drawPolygon(*points_array, 3)
+                        else:
+                            painter.drawEllipse(x_pixel - size//2, y_pixel - size//2, size, size)
+
+                        if request.points_labels and point_info['label']:
+                            painter.setPen(QPen(QColor(0, 0, 0)))
+                            painter.setFont(QFont('Arial', max(8, size//2)))
+                            painter.drawText(x_pixel + size, y_pixel, point_info['label'])
+
+            except json.JSONDecodeError:
+                return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format des points doit être un JSON valide"))
+
+        painter.end()
+
+        fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
+        os.close(fd)
+        session.add_temp_file(out_path)
+
+        if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg]:
+            if image.hasAlphaChannel():
+                final_image = QImage(image.size(), QImage.Format_RGB32)
+                final_image.fill(QColor(255, 255, 255))
+                temp_painter = QPainter(final_image)
+                temp_painter.drawImage(0, 0, image)
+                temp_painter.end()
+                final_image.save(out_path, "JPEG", request.quality)
+            else:
+                image.save(out_path, "JPEG", request.quality)
+            media_type = "image/jpeg"
+        else:
+            image.save(out_path, "PNG")
+            media_type = "image/png"
+
+        background_tasks.add_task(os.remove, out_path)
+
+        return FileResponse(out_path, media_type=media_type, filename=f"map.{request.format_image}")
+
+    except Exception as e:
+        return handle_exception(e, "render_map", "Impossible de générer le rendu de la carte")
+
+@app.post("/croquis/generate")
+def generate_croquis(request: GenerateCroquisRequest):
+    try:
+        required_fields = [
+            (request.region, "Veuillez sélectionner la région administrative correspondant à la parcelle !"),
+            (request.province, "Veuillez sélectionner la province dans laquelle se trouve la parcelle !"),
+            (request.commune, "Veuillez sélectionner la commune ou district administratif !"),
+            (request.village, "Veuillez sélectionner le nom administratif du village où se trouve la parcelle !"),
+            (request.demandeur, "Veuillez entrer le nom et le prénom du demandeur !")
+        ]
+
+        for value, error_msg in required_fields:
+            if not value:
+                return JSONResponse(status_code=400, content=standard_response(success=False, message=error_msg))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        # ICI : Intégrer la logique de génération de croquis (simulée)
+        # Simuler la génération d'un PDF
+        fd, pdf_path = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        session.add_temp_file(pdf_path)
+
+        # Simuler contenu PDF
+        c = canvas.Canvas(pdf_path, pagesize=A4)
+        c.drawString(100, 750, f"Croquis pour {request.demandeur}")
+        c.drawString(100, 730, f"Région: {request.region}, Province: {request.province}")
+        c.drawString(100, 710, f"Commune: {request.commune}, Village: {request.village}")
+        c.save()
+
+        return standard_response(
+            success=True,
+            data={"nom": "croquis.pdf"},
+            message="Croquis généré avec succès au format pdf",
+            metadata={
+                'download_url': f"/download/{os.path.basename(pdf_path)}",
+                'preview_available': True
+            }
+        )
+
+    except Exception as e:
+        return handle_exception(e, "generate_croquis", "Impossible de générer le croquis")
+
+@app.get("/download/{filename}")
+def download_file(filename: str):
+    try:
+        # Trouver le fichier dans les sessions
+        for session in project_sessions.values():
+            for temp_file in session.temporary_files:
+                if os.path.basename(temp_file) == filename:
+                    if os.path.exists(temp_file):
+                        return FileResponse(temp_file, filename=filename)
+                    else:
+                        return JSONResponse(status_code=404, content=standard_response(success=False, message="Fichier non trouvé"))
+
+        return JSONResponse(status_code=404, content=standard_response(success=False, message="Fichier non trouvé"))
+    except Exception as e:
+        return handle_exception(e, "download_file", "Impossible de télécharger le fichier")
 
 @app.post("/sessions/cleanup")
 def cleanup_sessions(max_age_hours: int = 24):
     try:
         cleanup_expired_sessions(max_age_hours=max_age_hours)
-        return {"message": "Cleanup executed"}
-    except Exception:
-        logger.exception("Erreur cleanup_sessions endpoint")
-        raise HTTPException(status_code=500, detail="Erreur lors du nettoyage")
-
+        return standard_response(success=True, message="Cleanup executed")
+    except Exception as e:
+        return handle_exception(e, "cleanup_sessions", "Erreur lors du nettoyage")
 
 # ---------- Lancer l'app ----------
 if __name__ == "__main__":
-    # Exemple: uvicorn.run("this_file_name:app", host="0.0.0.0", port=8000, reload=True)
     uvicorn.run(app, host="0.0.0.0", port=10000)
