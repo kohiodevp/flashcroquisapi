@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: monvps
+    name: flashcroquisapi
     env: docker
     region: frankfurt # optional (defaults to oregon)
     plan: free # optional (defaults to starter)
