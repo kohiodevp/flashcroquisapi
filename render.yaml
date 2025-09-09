@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: monvps
+    env: docker
+    region: frankfurt # optional (defaults to oregon)
+    plan: free # optional (defaults to starter)
+    branch: main # optional (defaults to master)
+    numInstances: 1
+    healthCheckPath: /healthz
+    envVars:
+      # - key: ADMIN_PASSWORD
+        # value: KOHIO1234
