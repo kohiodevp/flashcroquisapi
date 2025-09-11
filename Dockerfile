@@ -14,4 +14,4 @@ COPY . /app
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Démarrage de l’API
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
