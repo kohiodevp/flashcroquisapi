@@ -860,8 +860,8 @@ async def add_vector_layer(request: AddVectorLayerRequest, background_tasks: Bac
             return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
 
         file_ext = Path(request.data_source).suffix.lower()
-        if file_ext not in ALLOWED_EXTENSIONS:
-            return JSONResponse(status_code=400, content=standard_response(success=False, message=f"Extension non supportée: {file_ext}"))
+        # if file_ext not in ALLOWED_EXTENSIONS:
+        #     return JSONResponse(status_code=400, content=standard_response(success=False, message=f"Extension non supportée: {file_ext}"))
 
         success, error = initialize_qgis_if_needed()
         if not success:
@@ -1035,7 +1035,7 @@ def save_project(request: SaveProjectRequest):
             return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
 
         if not request.project_path:
-            path_dir = os.path.join(Path.home(), 'Documents', 'DocsFlashCroquis')
+            path_dir = os.path.join(Path.home(), 'DocsFlashCroquis')
             request.project_path = os.path.join(path_dir, f'{request.session_id}.qgs')
 
         os.makedirs(os.path.dirname(request.project_path), exist_ok=True)
@@ -1714,7 +1714,7 @@ async def upload_file(file: UploadFile = File(...)):
         if file_extension not in allowed_extensions:
             return JSONResponse(status_code=400, content=standard_response(success=False, message=f"Type de fichier non autorisé. Extensions autorisées: {', '.join(allowed_extensions)}"))
 
-        upload_dir = os.path.join(tempfile.gettempdir(), 'flashcroquis_uploads')
+        upload_dir = os.path.join(Path.home(), 'DocsFlashCroquis')
         os.makedirs(upload_dir, exist_ok=True)
 
         unique_filename = f"{uuid.uuid4().hex}_{file.filename}"
@@ -1759,7 +1759,9 @@ def download_file(filename: str):
                         return JSONResponse(status_code=404, content=standard_response(success=False, message="Fichier non trouvé"))
 
         # Also check upload directory
-        upload_dir = os.path.join(tempfile.gettempdir(), 'flashcroquis_uploads')
+        upload_dir = os.path.join(Path.home(), 'DocsFlashCroquis')
+
+
         full_path = os.path.join(upload_dir, filename)
         if os.path.exists(full_path):
             return FileResponse(full_path, filename=filename)
@@ -1775,7 +1777,8 @@ def list_files(
     per_page: int = Query(20, ge=1, le=100)
 ):
     try:
-        upload_dir = os.path.join(tempfile.gettempdir(), 'flashcroquis_uploads')
+        upload_dir = os.path.join(Path.home(), 'DocsFlashCroquis')
+
         if not os.path.exists(upload_dir):
             return standard_response(
                 success=True,
