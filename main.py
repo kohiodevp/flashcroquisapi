@@ -655,6 +655,10 @@ def shutdown_event():
         logger.exception("Erreur cleanup qgis_manager au shutdown")
 
 # ---------- Endpoints ----------
+@app.get("/healthz")
+def healthz():
+    return True
+
 @app.get("/ping")
 def ping():
     manager = get_qgis_manager()
