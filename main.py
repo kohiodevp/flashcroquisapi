@@ -796,7 +796,7 @@ def create_print_layout_with_qgs(layout_name, project, map_items_config=None):
         QgsLayoutPoint = classes['QgsLayoutPoint']
         QgsLayoutSize = classes['QgsLayoutSize']
         
-        locale.setlocale(locale.LC_TIME, "fr_FR")
+        # locale.setlocale(locale.LC_TIME, "fr_FR")
         date = datetime.now().strftime(r"%d %B %Y")
         # Créer un nouveau layout
         layout = QgsPrintLayout(project)
