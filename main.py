@@ -2346,7 +2346,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         os.makedirs(upload_dir, exist_ok=True)
 
         unique_filename = f"{uuid.uuid4().hex}_{request.format_image}"
-        file_path = os.path.join(upload_dir, unique_filename)
+        out_path = os.path.join(upload_dir, unique_filename)
         
         # Configuration d'exportation
         if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg]:
@@ -2388,7 +2388,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
             data={"nom": "croquis.pdf"},
             message="Croquis généré avec succès au format pdf",
             metadata={
-                'download_url': f"{file_path}",
+                'download_url': f"{out_path}",
                 'preview_available': True
             }
         )
