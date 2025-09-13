@@ -411,7 +411,8 @@ class QgisManager:
                 QgsLayoutItemShape,
                 QgsSymbol,
                 QgsSimpleFillSymbolLayer,
-                QgsSimpleLineSymbolLayer
+                QgsSimpleLineSymbolLayer,
+                QgsLayoutMeasurement
             )
 
             from qgis.analysis import QgsNativeAlgorithms
@@ -474,7 +475,8 @@ class QgisManager:
                 'QgsLayoutItemShape': QgsLayoutItemShape,
                 'QgsSymbol': QgsSymbol,
                 'QgsSimpleFillSymbolLayer': QgsSimpleFillSymbolLayer,
-                'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer
+                'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer,
+                'QgsLayoutMeasurement': QgsLayoutMeasurement
             }
 
             self._initialized = True
@@ -2113,22 +2115,22 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         QgsLayoutItemLegend = classes['QgsLayoutItemLegend']
         QgsLayoutExporter = classes['QgsLayoutExporter']
         QgsLayoutPoint = classes['QgsLayoutPoint']
-        QgsLayoutSize = classes['QgsLayoutSize'] # Important: utiliser QgsLayoutSize
+        QgsLayoutSize = classes['QgsLayoutSize']
+        QgsLayoutPage = classes['QgsLayoutPage'] # Ajout
+        QgsLayoutMeasurement = classes['QgsLayoutMeasurement'] # Ajout
         QgsRectangle = classes['QgsRectangle']
         QgsUnitTypes = classes['QgsUnitTypes']
         project = session.get_project(QgsProject)
         # Créer le layout
         layout = QgsPrintLayout(project)
         layout.initializeDefaults()
-        layout.setName(request.layout_name or "Carte") 
+        layout.setName(request.layout_name or "Carte")
         
-        # Configurer les dimensions de page
+        # --- CORRECTION 1: Gestion correcte de la page ---
         page_collection = layout.pageCollection()
         
-        # --- CORRECTION 2: Gestion correcte de la page ---
         if page_collection.pageCount() == 0:
              # Si aucune page n'existe, en ajouter une
-             from qgis.core import QgsLayoutPage
              new_page = QgsLayoutPage(layout)
              page_collection.addPage(new_page)
         
@@ -2146,11 +2148,18 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
             else:
                 page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
         else:  # CUSTOM
-            page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
+            if request.custom_width and request.custom_height: # Vérification
+                 page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
+            else:
+                 # Par défaut si les dimensions personnalisées ne sont pas fournies
+                 page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters)) 
 
         # Calculer les dimensions de la page pour les calculs suivants
         page_width_mm = page.pageSize().width()
         page_height_mm = page.pageSize().height()
+        
+        # ... (le reste du code de configuration du layout reste globalement le même,
+        # mais avec quelques corrections mineures et l'utilisation des enums) ...
         
         # Ajouter l'élément carte principal
         map_item = QgsLayoutItemMap(layout)
@@ -2185,11 +2194,14 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # Définir l'étendue de la carte
         extent = None
         if request.bbox:
-            coords = [float(x) for x in request.bbox.split(',')]
-            if len(coords) == 4:
-                extent = QgsRectangle(coords[0], coords[1], coords[2], coords[3])
-            else:
-                return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format bbox doit être: xmin,ymin,xmax,ymax"))
+            try: # Ajout de try/except pour le parsing de bbox
+                coords = [float(x) for x in request.bbox.split(',')]
+                if len(coords) == 4:
+                    extent = QgsRectangle(coords[0], coords[1], coords[2], coords[3])
+                else:
+                    return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format bbox doit être: xmin,ymin,xmax,ymax"))
+            except ValueError:
+                 return JSONResponse(status_code=400, content=standard_response(success=False, message="Format de bbox invalide. Les coordonnées doivent être des nombres."))
         if extent:
             map_item.setExtent(extent)
         else:
@@ -2223,7 +2235,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 if scale_value > 0:
                     map_item.setScale(scale_value)
             except ValueError:
-                pass
+                pass # Ignorer une échelle mal formée
         # Configurer les couches visibles
         visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
         map_item.setLayers(visible_layers)
@@ -2307,7 +2319,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     if shape_item:
                         layout.addLayoutItem(shape_item)
                 except Exception as e:
-                    logger.error(f"Erreur lors de la création de la forme {shape_data.type}: {e}")
+                    logger.error(f"Erreur lors de la création de la forme {shape_data.type}: {e}") # Utiliser logger
         # Ajouter les étiquettes personnalisées  
         if request.labels:
             for label_data in request.labels:
@@ -2316,9 +2328,9 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     if label_item:
                         layout.addLayoutItem(label_item)
                 except Exception as e:
-                    logger.error(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}")
+                    logger.error(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}") # Utiliser logger
 
-        # --- CORRECTION 3: Utiliser un fichier temporaire pour l'exportation ---
+        # --- CORRECTION 2: Utiliser un fichier temporaire pour l'exportation ---
         fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
         os.close(fd)
         session.add_temp_file(out_path) # Pour nettoyage potentiel
@@ -2326,45 +2338,51 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # Exporter le layout
         exporter = QgsLayoutExporter(layout)
         
-        result = QgsLayoutExporter.ExportResult.Fail
+        # --- CORRECTION 3: Accès correct à l'énumération ExportResult ---
+        # Utiliser l'objet ExportResult depuis les classes récupérées
+        ExportResult = classes['QgsLayoutExporter'].ExportResult 
+        result = ExportResult.Fail # Valeur par défaut
         media_type = "application/octet-stream"
         
         # Configuration d'exportation
         if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg, ImageFormat.png]:
             export_settings = QgsLayoutExporter.ImageExportSettings()
             export_settings.dpi = request.dpi
-            # --- CORRECTION 4: Utiliser QgsLayoutSize pour imageSize ---
-            export_settings.imageSize = QgsLayoutSize(page_width_mm, page_height_mm, QgsUnitTypes.LayoutMillimeters) 
+            # La taille de l'image est dérivée automatiquement de la taille de la page et du DPI
+            # export_settings.imageSize n'est pas nécessaire pour l'exportation directe vers fichier
             
             if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg]:
-                result = exporter.exportToImage(out_path, export_settings, 'JPEG') # Spécifier le format
+                # Spécifier le format pour l'exportation
+                result = exporter.exportToImage(out_path, export_settings, 'JPEG') 
                 media_type = "image/jpeg"
             else: # PNG
-                result = exporter.exportToImage(out_path, export_settings, 'PNG') # Spécifier le format
+                result = exporter.exportToImage(out_path, export_settings, 'PNG')
                 media_type = "image/png"
                 
-        elif request.format_image == "pdf":
+        elif request.format_image == "pdf": # Comparer avec une chaîne de caractères pour l'instant
             export_settings = QgsLayoutExporter.PdfExportSettings()
             export_settings.dpi = request.dpi
             export_settings.rasterizeWholeImage = False
-            # --- CORRECTION 5: Utiliser exportToPdf avec le bon nom de méthode ---
+            # --- CORRECTION 4: Utiliser exportToPdf avec le bon nom de méthode ---
             result = exporter.exportToPdf(out_path, export_settings) 
             media_type = "application/pdf"
         else:
             return JSONResponse(status_code=400, content=standard_response(success=False, message="Format d'image non supporté"))
 
         # Vérifier le résultat de l'exportation
-        # --- CORRECTION 6: Message d'erreur plus explicite ---
-        if result != QgsLayoutExporter.Success:
+        # --- CORRECTION 5: Message d'erreur plus explicite ---
+        if result != ExportResult.Success: # Comparer avec l'enum Success
             error_msg_map = {
-                QgsLayoutExporter.MemoryError: "Erreur mémoire",
-                QgsLayoutExporter.FileError: "Erreur de fichier",
-                QgsLayoutExporter.PrintError: "Erreur d'impression",
-                QgsLayoutExporter.SvgLayerError: "Erreur de couche SVG",
-                QgsLayoutExporter.InvalidSourceError: "Source invalide",
-                QgsLayoutExporter.Fail: "Échec inconnu"
+                # Utiliser les membres réels de l'énumération
+                getattr(ExportResult, 'MemoryError', ExportResult.Fail): "Erreur mémoire",
+                getattr(ExportResult, 'FileError', ExportResult.Fail): "Erreur de fichier",
+                getattr(ExportResult, 'PrintError', ExportResult.Fail): "Erreur d'impression",
+                getattr(ExportResult, 'SvgLayerError', ExportResult.Fail): "Erreur de couche SVG",
+                getattr(ExportResult, 'InvalidSourceError', ExportResult.Fail): "Source invalide",
+                ExportResult.Fail: "Échec inconnu"
             }
-            specific_error = error_msg_map.get(result, "Erreur inconnue")
+            # Utiliser get pour éviter une autre AttributeError si le membre n'existe pas
+            specific_error = error_msg_map.get(result, f"Erreur inconnue (Code: {result})")
             return JSONResponse(
                 status_code=500, 
                 content=standard_response(
@@ -2373,10 +2391,10 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 )
             )
 
-        # --- CORRECTION 7: Nettoyer le fichier temporaire après l'envoi ---
-        background_tasks.add_task(os.remove, out_path)
+        # --- CORRECTION 6: Nettoyer le fichier temporaire après l'envoi ---
+        background_tasks.add_task(os.remove, out_path) 
         
-        # --- CORRECTION 8: Retourner le fichier généré ---
+        # --- CORRECTION 7: Retourner le fichier généré ---
         return FileResponse(out_path, media_type=media_type, filename=f"layout.{request.format_image}")
 
     except Exception as e:
@@ -2384,6 +2402,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # Note: Cela ne couvre pas tous les cas, mais c'est un début.
         # Une gestion plus robuste nécessiterait de stocker `out_path` dans un scope plus large.
         return handle_exception(e, "render_print_layout", "Impossible de générer le layout d'impression")
+
 
 @app.post("/croquis/generate")
 def generate_croquis(request: GenerateCroquisRequest):
