@@ -411,9 +411,7 @@ class QgisManager:
                 QgsLayoutItemShape,
                 QgsSymbol,
                 QgsSimpleFillSymbolLayer,
-                QgsSimpleLineSymbolLayer,
-                QgsLayoutMeasurement,
-                QgsLayoutPage
+                QgsSimpleLineSymbolLayer
             )
 
             from qgis.analysis import QgsNativeAlgorithms
@@ -476,9 +474,7 @@ class QgisManager:
                 'QgsLayoutItemShape': QgsLayoutItemShape,
                 'QgsSymbol': QgsSymbol,
                 'QgsSimpleFillSymbolLayer': QgsSimpleFillSymbolLayer,
-                'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer,
-                'QgsLayoutMeasurement': QgsLayoutMeasurement,
-                'QgsLayoutPage': QgsLayoutPage
+                'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer
             }
 
             self._initialized = True
@@ -2118,8 +2114,6 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         QgsLayoutExporter = classes['QgsLayoutExporter']
         QgsLayoutPoint = classes['QgsLayoutPoint']
         QgsLayoutSize = classes['QgsLayoutSize']
-        QgsLayoutPage = classes['QgsLayoutPage'] # Ajout
-        QgsLayoutMeasurement = classes['QgsLayoutMeasurement'] # Ajout
         QgsRectangle = classes['QgsRectangle']
         QgsUnitTypes = classes['QgsUnitTypes']
         project = session.get_project(QgsProject)
@@ -2132,29 +2126,30 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         page_collection = layout.pageCollection()
         
         if page_collection.pageCount() == 0:
-             # Si aucune page n'existe, en ajouter une
-             new_page = QgsLayoutPage(layout)
-             page_collection.addPage(new_page)
+            logger.warning("Aucune page trouvée dans le layout après initializeDefaults. La configuration de la taille de page pourrait échouer.")
         
         # Maintenant il y a au moins une page
         page = page_collection.page(0) 
-        
-        if request.page_format == PageFormat.A4:
-            if request.orientation == Orientation.PORTRAIT:
-                page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
-            else:
-                page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
-        elif request.page_format == PageFormat.A3:
-            if request.orientation == Orientation.PORTRAIT:
-                page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
-            else:
-                page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
-        else:  # CUSTOM
-            if request.custom_width and request.custom_height: # Vérification
-                 page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
-            else:
-                 # Par défaut si les dimensions personnalisées ne sont pas fournies
-                 page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters)) 
+
+        try:
+            page = page_collection.page(0) # Cela pourrait échouer si aucune page n'existe.
+            if request.page_format == PageFormat.A4: # Utiliser l'enum directement
+                if request.orientation == Orientation.PORTRAIT:
+                    page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
+                else:
+                    page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
+            elif request.page_format == PageFormat.A3:
+                if request.orientation == Orientation.PORTRAIT:
+                    page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
+                else:
+                    page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
+            else:  # CUSTOM
+                if request.custom_width and request.custom_height: # Vérification
+                     page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
+                # Pas de else par défaut ici car CUSTOM implique que les dimensions sont fournies.
+        except Exception as e:
+             logger.error(f"Erreur lors de la configuration de la taille de la page: {e}")
+    
 
         # Calculer les dimensions de la page pour les calculs suivants
         page_width_mm = page.pageSize().width()
