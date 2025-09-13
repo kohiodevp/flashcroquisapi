@@ -475,7 +475,7 @@ class QgisManager:
                 'QgsLayoutItemShape': QgsLayoutItemShape,
                 'QgsSymbol': QgsSymbol,
                 'QgsSimpleFillSymbolLayer': QgsSimpleFillSymbolLayer,
-                'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer
+                'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer,
                 'QgsLayoutItemPage': QgsLayoutItemPage
             }
 
