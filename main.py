@@ -2285,30 +2285,56 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
             map_item.setExtent(extent)
         else:
             # Calculer l'étendue du projet
-            project_extent = QgsRectangle()
-            project_extent.setMinimal()
-            visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid() and not layer.extent().isEmpty()]
+            # Calculer l'étendue du projet de manière plus fiable
+            project_extent = None
+            visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
+
             for layer in visible_layers:
-                if project_extent.isEmpty():
-                    project_extent = QgsRectangle(layer.extent())
-                else:
-                    project_extent.combineExtentWith(layer.extent())
-            
-            if not project_extent.isEmpty():
-                # Ajouter une marge
-                margin = 0.05
-                width_margin = (project_extent.xMaximum() - project_extent.xMinimum()) * margin
-                height_margin = (project_extent.yMaximum() - project_extent.yMinimum()) * margin
+                layer_extent = layer.extent()
+                # Vérification robuste : l'étendue doit être non-vide ET avoir une largeur/hauteur significative
+                if (not layer_extent.isEmpty() and
+                    layer_extent.width() > 1e-8 and
+                    layer_extent.height() > 1e-8):
+                    if project_extent is None:
+                        project_extent = QgsRectangle(layer_extent)
+                    else:
+                        project_extent.combineExtentWith(layer_extent)
+
+            if project_extent is not None and not project_extent.isEmpty():
+                # Ajouter une marge de 5%
+                margin_x = project_extent.width() * 0.05
+                margin_y = project_extent.height() * 0.05
                 extended_extent = QgsRectangle(
-                    project_extent.xMinimum() - width_margin,
-                    project_extent.yMinimum() - height_margin,
-                    project_extent.xMaximum() + width_margin,
-                    project_extent.yMaximum() + height_margin
+                    project_extent.xMinimum() - margin_x,
+                    project_extent.yMinimum() - margin_y,
+                    project_extent.xMaximum() + margin_x,
+                    project_extent.yMaximum() + margin_y
                 )
                 map_item.setExtent(extended_extent)
+                logger.info(f"Extent défini pour le layout: {extended_extent.toString()}")
             else:
-                map_item.setExtent(QgsRectangle(-180, -90, 180, 90))
-        
+                # Fallback : utiliser l'étendue d'une couche valide individuelle
+                for layer in visible_layers:
+                    layer_extent = layer.extent()
+                    if (not layer_extent.isEmpty() and
+                        layer_extent.width() > 1e-8 and
+                        layer_extent.height() > 1e-8):
+                        margin_x = layer_extent.width() * 0.05
+                        margin_y = layer_extent.height() * 0.05
+                        extended_extent = QgsRectangle(
+                            layer_extent.xMinimum() - margin_x,
+                            layer_extent.yMinimum() - margin_y,
+                            layer_extent.xMaximum() + margin_x,
+                            layer_extent.yMaximum() + margin_y
+                        )
+                        map_item.setExtent(extended_extent)
+                        logger.info(f"Extent défini à partir d'une couche unique: {extended_extent.toString()}")
+                        break
+                else:
+                    # Dernier recours : étendue par défaut
+                    logger.warning("Aucune étendue valide trouvée, utilisation de l'étendue par défaut.")
+                    map_item.setExtent(QgsRectangle(-180, -90, 180, 90))
+                    
         # Définir l'échelle si spécifiée
         if request.scale:
             try:
