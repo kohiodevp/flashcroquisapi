@@ -21,7 +21,7 @@ import zipfile
 import json
 import math
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Dict, Any, Optional, Tuple, Union, Literal
 from datetime import datetime, timedelta
 from enum import Enum
 
@@ -29,7 +29,7 @@ import logging
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Query, Path as FastPath, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator, Literal
+from pydantic import BaseModel, Field, validator
 import uvicorn
 from PyQt5.QtCore import QSize, Qt, QPoint, QBuffer, QByteArray, QIODevice
 from PyQt5.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont, QImageReader
