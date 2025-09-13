@@ -20,6 +20,7 @@ import asyncio
 import zipfile
 import json
 import math
+import locale
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Union, Literal
 from datetime import datetime, timedelta
