@@ -2147,24 +2147,24 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # Créer le layout
         layout = QgsPrintLayout(project)
         layout.initializeDefaults()
-        layout.setName(request.layout_name or "Carte")
+        # layout.setName(request.layout_name or "Carte")
         
-        # Configurer les dimensions de page
-        page_collection = layout.pageCollection()
-        if page_collection.pageCount() > 0:
-            page = page_collection.page(0)
-            if request.page_format == "A4":
-                if request.orientation == "portrait":
-                    page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
-                else:
-                    page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
-            elif request.page_format == "A3":
-                if request.orientation == "portrait":
-                    page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
-                else:
-                    page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
-            else:  # Custom
-                page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
+        # # Configurer les dimensions de page
+        # page_collection = layout.pageCollection()
+        # if page_collection.pageCount() > 0:
+        #     page = page_collection.page(0)
+        #     if request.page_format == "A4":
+        #         if request.orientation == "portrait":
+        #             page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
+        #         else:
+        #             page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
+        #     elif request.page_format == "A3":
+        #         if request.orientation == "portrait":
+        #             page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
+        #         else:
+        #             page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
+        #     else:  # Custom
+        #         page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
 
         # Ajouter l'élément carte principal
         map_item = QgsLayoutItemMap(layout)
