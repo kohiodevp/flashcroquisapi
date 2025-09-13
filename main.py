@@ -33,7 +33,6 @@ from pydantic import BaseModel, Field, validator
 import uvicorn
 from PyQt5.QtCore import QSize, Qt, QPoint, QBuffer, QByteArray, QIODevice
 from PyQt5.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont, QImageReader
-from PyPDF2 import PdfMerger
 
 # ---------- Configuration logging ----------
 logging.basicConfig(
@@ -62,6 +61,29 @@ class LabelPosition(str, Enum):
     corners = "corners"
     edges = "edges"
     all = "all"
+
+class PageFormat(str, Enum):
+    A4 = "A4"
+    A3 = "A3"
+    CUSTOM = "custom"
+
+class Orientation(str, Enum):
+    PORTRAIT = "portrait"
+    LANDSCAPE = "landscape"
+
+class LegendPosition(str, Enum):
+    RIGHT = "right"
+    LEFT = "left"
+    TOP = "top"
+    BOTTOM = "bottom"
+
+class ShapeType(str, Enum):
+    RECTANGLE = "rectangle"
+    CIRCLE = "circle"
+    ELLIPSE = "ellipse"
+    POLYGON = "polygon"
+    LINE = "line"
+    ARROW = "arrow"
 
 # ---------- Pydantic Models ----------
 class StandardResponse(BaseModel):
@@ -201,6 +223,136 @@ class UploadFileResponse(BaseModel):
     extension: str
     upload_time: str
 
+class LabelItem(BaseModel):
+    text: str = Field(..., description="Texte de l'étiquette")
+    x: float = Field(..., description="Coordonnée X géographique")
+    y: float = Field(..., description="Coordonnée Y géographique")
+    font_size: int = Field(default=12, description="Taille de police")
+    font_color: str = Field(default="#000000", description="Couleur du texte")
+    font_family: str = Field(default="Arial", description="Police")
+    bold: bool = Field(default=False, description="Texte en gras")
+    italic: bool = Field(default=False, description="Texte en italique")
+    background_color: Optional[str] = Field(default=None, description="Couleur de fond")
+    border_color: Optional[str] = Field(default=None, description="Couleur de bordure")
+    rotation: float = Field(default=0, description="Rotation en degrés")
+    offset_x: float = Field(default=0, description="Décalage X en mm")
+    offset_y: float = Field(default=0, description="Décalage Y en mm")
+
+class ShapeItem(BaseModel):
+    type: ShapeType = Field(..., description="Type de forme")
+    coordinates: list[float] = Field(..., description="Coordonnées géographiques")
+    style: dict = Field(default_factory=dict, description="Style de la forme")
+    
+    class Config:
+        json_schema_extra = {
+            "examples": [
+                {
+                    "type": "rectangle",
+                    "coordinates": [-5.0, 11.0, -4.5, 11.5],  # [xmin, ymin, xmax, ymax]
+                    "style": {
+                        "fill_color": "#FF0000",
+                        "border_color": "#000000", 
+                        "border_width": 2,
+                        "opacity": 0.3
+                    }
+                },
+                {
+                    "type": "circle",
+                    "coordinates": [-4.7, 11.2, 0.1],  # [x, y, radius_in_map_units]
+                    "style": {
+                        "fill_color": "#00FF00",
+                        "border_color": "#000000",
+                        "border_width": 1
+                    }
+                },
+                {
+                    "type": "polygon", 
+                    "coordinates": [-5.0, 11.0, -4.8, 11.2, -4.6, 11.0, -4.8, 10.8],  # [x1,y1,x2,y2,...]
+                    "style": {
+                        "fill_color": "#0000FF",
+                        "border_color": "#FFFFFF",
+                        "border_width": 2
+                    }
+                },
+                {
+                    "type": "line",
+                    "coordinates": [-5.0, 11.0, -4.5, 11.5],  # [x1, y1, x2, y2]
+                    "style": {
+                        "color": "#FF0000",
+                        "width": 3,
+                        "style": "solid"  # solid, dashed, dotted
+                    }
+                }
+            ]
+        }
+
+class PrintLayoutRequest(BaseModel):
+    session_id: str = Field(..., description="Identifiant de la session")
+    
+    # Configuration de la page
+    page_format: PageFormat = Field(default=PageFormat.A4, description="Format de la page")
+    orientation: Orientation = Field(default=Orientation.LANDSCAPE, description="Orientation de la page")
+    custom_width: Optional[float] = Field(default=297, description="Largeur personnalisée en mm (pour format custom)")
+    custom_height: Optional[float] = Field(default=210, description="Hauteur personnalisée en mm (pour format custom)")
+    
+    # Configuration de la carte
+    bbox: Optional[str] = Field(default=None, description="Étendue de la carte (xmin,ymin,xmax,ymax)")
+    scale: Optional[str] = Field(default=None, description="Échelle de la carte")
+    
+    # Marges de la carte (en mm)
+    map_margin_top: float = Field(default=20, description="Marge supérieure de la carte en mm")
+    map_margin_bottom: float = Field(default=20, description="Marge inférieure de la carte en mm")
+    map_margin_left: float = Field(default=20, description="Marge gauche de la carte en mm")
+    map_margin_right: float = Field(default=20, description="Marge droite de la carte en mm")
+    
+    # Titre
+    show_title: bool = Field(default=False, description="Afficher le titre")
+    title: Optional[str] = Field(default=None, description="Texte du titre")
+    title_font_size: int = Field(default=16, description="Taille de police du titre")
+    
+    # Légende
+    show_legend: bool = Field(default=False, description="Afficher la légende")
+    legend_position: LegendPosition = Field(default=LegendPosition.RIGHT, description="Position de la légende")
+    legend_width: float = Field(default=60, description="Largeur de la légende en mm")
+    legend_height: float = Field(default=40, description="Hauteur de la légende en mm")
+    
+    # Échelle graphique
+    show_scale_bar: bool = Field(default=False, description="Afficher l'échelle graphique")
+    
+    # Flèche du nord
+    show_north_arrow: bool = Field(default=False, description="Afficher la flèche du nord")
+    
+    # Étiquettes et formes
+    labels: list[LabelItem] = Field(default_factory=list, description="Liste des étiquettes à ajouter")
+    shapes: list[ShapeItem] = Field(default_factory=list, description="Liste des formes à ajouter")
+    
+    # Configuration d'exportation
+    format_image: Literal["png", "jpg", "jpeg", "pdf"] = Field(default="png", description="Format d'exportation")
+    dpi: int = Field(default=300, description="Résolution en DPI", ge=72, le=600)
+    quality: int = Field(default=95, description="Qualité JPEG (1-100)", ge=1, le=100)
+    
+    # Nom du layout
+    layout_name: Optional[str] = Field(default=None, description="Nom du layout")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "12345",
+                "page_format": "A4",
+                "orientation": "landscape",
+                "show_title": True,
+                "title": "Carte de la région",
+                "title_font_size": 18,
+                "show_legend": True,
+                "legend_position": "right",
+                "show_scale_bar": True,
+                "show_north_arrow": True,
+                "format_image": "pdf",
+                "dpi": 300,
+                "bbox": "-180,-90,180,90"
+            }
+        }
+
 # ---------- QgisManager ----------
 class QgisManager:
     def __init__(self):
@@ -248,7 +400,18 @@ class QgisManager:
                 QgsVectorLayerSimpleLabeling,
                 QgsLayoutExporter,
                 QgsWkbTypes,
-                QgsPrintLayout
+                QgsPrintLayout,
+                QgsLayoutItemMap,
+                QgsLayoutItemLabel,
+                QgsLayoutItemScaleBar,
+                QgsLayoutItemLegend,
+                QgsLayoutPoint,
+                QgsLayoutSize,
+                QgsUnitTypes,
+                QgsLayoutItemShape,
+                QgsSymbol,
+                QgsSimpleFillSymbolLayer,
+                QgsSimpleLineSymbolLayer
             )
 
             from qgis.analysis import QgsNativeAlgorithms
@@ -300,7 +463,18 @@ class QgisManager:
                 'QgsVectorLayerSimpleLabeling': QgsVectorLayerSimpleLabeling,
                 'QgsLayoutExporter': QgsLayoutExporter,
                 'QgsWkbTypes': QgsWkbTypes,
-                'QgsPrintLayout': QgsPrintLayout
+                'QgsPrintLayout': QgsPrintLayout,
+                'QgsLayoutItemMap': QgsLayoutItemMap,
+                'QgsLayoutItemLabel': QgsLayoutItemLabel,
+                'QgsLayoutItemScaleBar': QgsLayoutItemScaleBar,
+                'QgsLayoutItemLegend': QgsLayoutItemLegend,
+                'QgsLayoutPoint': QgsLayoutPoint,
+                'QgsLayoutSize': QgsLayoutSize,
+                'QgsUnitTypes': QgsUnitTypes,
+                'QgsLayoutItemShape': QgsLayoutItemShape,
+                'QgsSymbol': QgsSymbol,
+                'QgsSimpleFillSymbolLayer': QgsSimpleFillSymbolLayer,
+                'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer
             }
 
             self._initialized = True
@@ -600,21 +774,314 @@ async def periodic_cleanup():
         await asyncio.sleep(3600)
         cleanup_expired_sessions(max_age_hours=24)
 
-def create_print_layout_croquis(layout_name, project, map_items_config=None):
-    """Placeholder function - needs to be implemented with actual QgsPrintLayout logic"""
-    classes = get_qgis_manager().get_classes()
-    QgsPrintLayout = classes['QgsPrintLayout']
-    layout = QgsPrintLayout(project)
-    layout.initializeDefaults()
-    layout.setName(layout_name)
-    return layout
+def create_shape_item(layout, shape_data: ShapeItem, map_item):
+    """Crée un élément forme dans le layout"""
+    manager = get_qgis_manager()
+    classes = manager.get_classes()
+    QgsLayoutItemShape = classes['QgsLayoutItemShape']
+    QgsLayoutPoint = classes['QgsLayoutPoint']
+    QgsLayoutSize = classes['QgsLayoutSize']
+    QgsUnitTypes = classes['QgsUnitTypes']
+    QgsSymbol = classes['QgsSymbol']
+    QgsSimpleFillSymbolLayer = classes['QgsSimpleFillSymbolLayer']
+    QgsSimpleLineSymbolLayer = classes['QgsSimpleLineSymbolLayer']
+    
+    try:
+        # Convertir les coordonnées géographiques en coordonnées de layout
+        coords = shape_data.coordinates
+        map_extent = map_item.extent()
+        map_rect = map_item.sizeWithUnits()
+        map_pos = map_item.positionWithUnits()
+        
+        def geo_to_layout(geo_x, geo_y):
+            """Convertit des coordonnées géographiques en coordonnées de layout (mm)"""
+            # Position relative dans l'étendue de la carte (0-1)
+            rel_x = (geo_x - map_extent.xMinimum()) / map_extent.width()
+            rel_y = 1 - (geo_y - map_extent.yMinimum()) / map_extent.height()  # Inverser Y
+            
+            # Position absolue en mm sur le layout
+            layout_x = map_pos.x() + rel_x * map_rect.width()
+            layout_y = map_pos.y() + rel_y * map_rect.height()
+            
+            return layout_x, layout_y
+        
+        style = shape_data.style or {}
+        
+        if shape_data.type == ShapeType.RECTANGLE:
+            if len(coords) != 4:
+                raise ValueError("Rectangle nécessite 4 coordonnées: [xmin, ymin, xmax, ymax]")
+            
+            # Créer le rectangle
+            shape_item = QgsLayoutItemShape(layout)
+            shape_item.setShapeType(QgsLayoutItemShape.Rectangle)
+            
+            x1, y1 = geo_to_layout(coords[0], coords[1])  # xmin, ymin
+            x2, y2 = geo_to_layout(coords[2], coords[3])  # xmax, ymax
+            
+            # Position et taille
+            pos_x = min(x1, x2)
+            pos_y = min(y1, y2)
+            width = abs(x2 - x1)
+            height = abs(y2 - y1)
+            
+            shape_item.attemptMove(QgsLayoutPoint(pos_x, pos_y, QgsUnitTypes.LayoutMillimeters))
+            shape_item.attemptResize(QgsLayoutSize(width, height, QgsUnitTypes.LayoutMillimeters))
+            
+            # Style
+            if 'fill_color' in style or 'border_color' in style:
+                symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.PolygonGeometry)
+                symbol_layer = symbol.symbolLayer(0)
+                
+                if 'fill_color' in style:
+                    symbol_layer.setFillColor(QColor(style['fill_color']))
+                if 'border_color' in style:
+                    symbol_layer.setStrokeColor(QColor(style['border_color']))
+                if 'border_width' in style:
+                    symbol_layer.setStrokeWidth(style['border_width'])
+                if 'opacity' in style:
+                    symbol.setOpacity(style['opacity'])
+                
+                shape_item.setSymbol(symbol)
+            
+            return shape_item
+            
+        elif shape_data.type == ShapeType.CIRCLE:
+            if len(coords) != 3:
+                raise ValueError("Cercle nécessite 3 coordonnées: [x_center, y_center, radius_in_map_units]")
+            
+            # Créer l'ellipse (cercle)
+            shape_item = QgsLayoutItemShape(layout)
+            shape_item.setShapeType(QgsLayoutItemShape.Ellipse)
+            
+            center_x, center_y = geo_to_layout(coords[0], coords[1])
+            radius_map_units = coords[2]
+            
+            # Convertir le rayon en mm sur le layout
+            radius_rel = radius_map_units / map_extent.width()
+            radius_mm = radius_rel * map_rect.width()
+            
+            # Position et taille (diamètre)
+            diameter = radius_mm * 2
+            pos_x = center_x - radius_mm
+            pos_y = center_y - radius_mm
+            
+            shape_item.attemptMove(QgsLayoutPoint(pos_x, pos_y, QgsUnitTypes.LayoutMillimeters))
+            shape_item.attemptResize(QgsLayoutSize(diameter, diameter, QgsUnitTypes.LayoutMillimeters))
+            
+            # Style similaire au rectangle
+            if 'fill_color' in style or 'border_color' in style:
+                symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.PolygonGeometry)
+                symbol_layer = symbol.symbolLayer(0)
+                
+                if 'fill_color' in style:
+                    symbol_layer.setFillColor(QColor(style['fill_color']))
+                if 'border_color' in style:
+                    symbol_layer.setStrokeColor(QColor(style['border_color']))
+                if 'border_width' in style:
+                    symbol_layer.setStrokeWidth(style['border_width'])
+                if 'opacity' in style:
+                    symbol.setOpacity(style['opacity'])
+                
+                shape_item.setSymbol(symbol)
+            
+            return shape_item
+            
+        elif shape_data.type == ShapeType.ELLIPSE:
+            if len(coords) != 4:
+                raise ValueError("Ellipse nécessite 4 coordonnées: [x_center, y_center, width_in_map_units, height_in_map_units]")
+            
+            shape_item = QgsLayoutItemShape(layout)
+            shape_item.setShapeType(QgsLayoutItemShape.Ellipse)
+            
+            center_x, center_y = geo_to_layout(coords[0], coords[1])
+            width_map_units = coords[2]
+            height_map_units = coords[3]
+            
+            # Convertir en mm
+            width_rel = width_map_units / map_extent.width()
+            height_rel = height_map_units / map_extent.height()
+            width_mm = width_rel * map_rect.width()
+            height_mm = height_rel * map_rect.height()
+            
+            pos_x = center_x - width_mm / 2
+            pos_y = center_y - height_mm / 2
+            
+            shape_item.attemptMove(QgsLayoutPoint(pos_x, pos_y, QgsUnitTypes.LayoutMillimeters))
+            shape_item.attemptResize(QgsLayoutSize(width_mm, height_mm, QgsUnitTypes.LayoutMillimeters))
+            
+            # Style
+            if 'fill_color' in style or 'border_color' in style:
+                symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.PolygonGeometry)
+                symbol_layer = symbol.symbolLayer(0)
+                
+                if 'fill_color' in style:
+                    symbol_layer.setFillColor(QColor(style['fill_color']))
+                if 'border_color' in style:
+                    symbol_layer.setStrokeColor(QColor(style['border_color']))
+                if 'border_width' in style:
+                    symbol_layer.setStrokeWidth(style['border_width'])
+                if 'opacity' in style:
+                    symbol.setOpacity(style['opacity'])
+                
+                shape_item.setSymbol(symbol)
+            
+            return shape_item
+            
+        elif shape_data.type in [ShapeType.POLYGON, ShapeType.LINE]:
+            if len(coords) < 4 or len(coords) % 2 != 0:
+                raise ValueError(f"{shape_data.type} nécessite un nombre pair de coordonnées >= 4: [x1,y1,x2,y2,...]")
+            
+            # Pour les polygones et lignes, on utilise QgsLayoutItemPolyline
+            QgsLayoutItemPolyline = classes['QgsLayoutItemPolyline']
+            
+            if shape_data.type == ShapeType.POLYGON:
+                shape_item = QgsLayoutItemShape(layout)
+                shape_item.setShapeType(QgsLayoutItemShape.Triangle)  # Base pour polygone personnalisé
+            else:  # LINE
+                shape_item = QgsLayoutItemPolyline(layout)
+            
+            # Convertir tous les points
+            points = []
+            for i in range(0, len(coords), 2):
+                x, y = geo_to_layout(coords[i], coords[i+1])
+                points.append(QPointF(x, y))
+            
+            if shape_data.type == ShapeType.POLYGON:
+                # Fermer le polygone si nécessaire
+                if points[0] != points[-1]:
+                    points.append(points[0])
+            
+            # Pour les lignes, définir les noeuds
+            if shape_data.type == ShapeType.LINE:
+                polygon = QPolygonF(points)
+                shape_item.setNodes(polygon)
+                
+                # Style ligne
+                if 'color' in style:
+                    symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.LineGeometry)
+                    symbol_layer = symbol.symbolLayer(0)
+                    symbol_layer.setColor(QColor(style['color']))
+                    if 'width' in style:
+                        symbol_layer.setWidth(style['width'])
+                    shape_item.setSymbol(symbol)
+            
+            return shape_item
+            
+        elif shape_data.type == ShapeType.ARROW:
+            if len(coords) != 4:
+                raise ValueError("Flèche nécessite 4 coordonnées: [x_start, y_start, x_end, y_end]")
+            
+            # Créer une ligne avec style flèche
+            QgsLayoutItemPolyline = classes['QgsLayoutItemPolyline']
+            shape_item = QgsLayoutItemPolyline(layout)
+            
+            x1, y1 = geo_to_layout(coords[0], coords[1])
+            x2, y2 = geo_to_layout(coords[2], coords[3])
+            
+            points = [QPointF(x1, y1), QPointF(x2, y2)]
+            polygon = QPolygonF(points)
+            shape_item.setNodes(polygon)
+            
+            # Style avec pointe de flèche
+            symbol = QgsSymbol.defaultSymbol(QgsWkbTypes.LineGeometry)
+            symbol_layer = symbol.symbolLayer(0)
+            
+            if 'color' in style:
+                symbol_layer.setColor(QColor(style['color']))
+            if 'width' in style:
+                symbol_layer.setWidth(style['width'])
+                
+            # Ajouter une pointe de flèche (approximation)
+            symbol_layer.setPenJoinStyle(Qt.RoundJoin)
+            symbol_layer.setPenCapStyle(Qt.RoundCap)
+            
+            shape_item.setSymbol(symbol)
+            
+            return shape_item
+            
+        else:
+            raise ValueError(f"Type de forme non supporté: {shape_data.type}")
+            
+    except Exception as e:
+        print(f"Erreur lors de la création de la forme {shape_data.type}: {e}")
+        return None
 
-def fusionner_pdfs_simple(chemin_pdf1, chemin_pdf2, chemin_sortie):
-    merger = PdfMerger()
-    merger.append(chemin_pdf1)
-    merger.append(chemin_pdf2)
-    merger.write(chemin_sortie)
-    merger.close()
+def create_label_item(layout, label_data: LabelItem, map_item):
+    """Crée un élément étiquette dans le layout"""
+    manager = get_qgis_manager()
+    classes = manager.get_classes()
+    QgsLayoutItemLabel = classes['QgsLayoutItemLabel']
+    QgsLayoutPoint = classes['QgsLayoutPoint'] 
+    QgsLayoutSize = classes['QgsLayoutSize']
+    QgsUnitTypes = classes['QgsUnitTypes']
+    
+    try:
+        # Convertir les coordonnées géographiques en coordonnées de layout
+        map_extent = map_item.extent()
+        map_rect = map_item.sizeWithUnits()
+        map_pos = map_item.positionWithUnits()
+        
+        # Position relative dans l'étendue de la carte (0-1)
+        rel_x = (label_data.x - map_extent.xMinimum()) / map_extent.width()
+        rel_y = 1 - (label_data.y - map_extent.yMinimum()) / map_extent.height()  # Inverser Y
+        
+        # Position absolue en mm sur le layout + décalages
+        layout_x = map_pos.x() + rel_x * map_rect.width() + label_data.offset_x
+        layout_y = map_pos.y() + rel_y * map_rect.height() + label_data.offset_y
+        
+        # Créer l'étiquette
+        label_item = QgsLayoutItemLabel(layout)
+        label_item.setText(label_data.text)
+        
+        # Configuration de la police
+        font = QFont(label_data.font_family, label_data.font_size)
+        font.setBold(label_data.bold)
+        font.setItalic(label_data.italic)
+        label_item.setFont(font)
+        
+        # Couleur du texte
+        label_item.setFontColor(QColor(label_data.font_color))
+        
+        # Calculer la taille approximative du texte
+        font_metrics = QFontMetrics(font)
+        text_width = font_metrics.horizontalAdvance(label_data.text) * 0.35  # Conversion pixels -> mm
+        text_height = font_metrics.height() * 0.35
+        
+        # Ajuster pour la rotation
+        if label_data.rotation != 0:
+            import math
+            rad = math.radians(label_data.rotation)
+            # Nouvelles dimensions après rotation
+            rotated_width = abs(text_width * math.cos(rad)) + abs(text_height * math.sin(rad))
+            rotated_height = abs(text_width * math.sin(rad)) + abs(text_height * math.cos(rad))
+            text_width = rotated_width
+            text_height = rotated_height
+            
+            label_item.setItemRotation(label_data.rotation)
+        
+        # Position et taille
+        label_item.attemptMove(QgsLayoutPoint(layout_x, layout_y, QgsUnitTypes.LayoutMillimeters))
+        label_item.attemptResize(QgsLayoutSize(text_width + 2, text_height + 2, QgsUnitTypes.LayoutMillimeters))
+        
+        # Fond et bordure
+        if label_data.background_color:
+            label_item.setBackgroundEnabled(True)
+            label_item.setBackgroundColor(QColor(label_data.background_color))
+        
+        if label_data.border_color:
+            label_item.setFrameEnabled(True)
+            label_item.setFrameStrokeColor(QColor(label_data.border_color))
+            label_item.setFrameStrokeWidth(QgsLayoutMeasurement(0.5))
+        
+        # Alignement centré
+        label_item.setHAlign(Qt.AlignHCenter)
+        label_item.setVAlign(Qt.AlignVCenter)
+        
+        return label_item
+        
+    except Exception as e:
+        print(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}")
+        return None
 
 # ---------- FastAPI App ----------
 app = FastAPI(
@@ -1623,6 +2090,297 @@ def render_map(request: MapRequest, background_tasks: BackgroundTasks):
 
     except Exception as e:
         return handle_exception(e, "render_map", "Impossible de générer le rendu de la carte")
+
+@app.post("/map/print-layout")
+def render_print_layout(request: PrintLayoutRequest, background_tasks: BackgroundTasks):
+    try:
+        if not request.session_id:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
+
+        success, error = initialize_qgis_if_needed()
+        if not success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
+        with project_sessions_lock:
+            session = project_sessions.get(request.session_id)
+            if session is None:
+                return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
+        manager = get_qgis_manager()
+        classes = manager.get_classes()
+        QgsProject = classes['QgsProject']
+        QgsPrintLayout = classes['QgsPrintLayout']
+        QgsLayoutItemMap = classes['QgsLayoutItemMap']
+        QgsLayoutItemLabel = classes['QgsLayoutItemLabel']
+        QgsLayoutItemScaleBar = classes['QgsLayoutItemScaleBar']
+        QgsLayoutItemLegend = classes['QgsLayoutItemLegend']
+        QgsLayoutExporter = classes['QgsLayoutExporter']
+        QgsLayoutPoint = classes['QgsLayoutPoint']
+        QgsLayoutSize = classes['QgsLayoutSize']
+        QgsRectangle = classes['QgsRectangle']
+        QgsUnitTypes = classes['QgsUnitTypes']
+
+        project = session.get_project(QgsProject)
+        
+        # Créer le layout
+        layout = QgsPrintLayout(project)
+        layout.initializeDefaults()
+        layout.setName(request.layout_name or "Carte")
+        
+        # Configurer les dimensions de page
+        page_collection = layout.pageCollection()
+        if page_collection.pageCount() > 0:
+            page = page_collection.page(0)
+            if request.page_format == "A4":
+                if request.orientation == "portrait":
+                    page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
+                else:
+                    page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
+            elif request.page_format == "A3":
+                if request.orientation == "portrait":
+                    page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
+                else:
+                    page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
+            else:  # Custom
+                page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
+
+        # Ajouter l'élément carte principal
+        map_item = QgsLayoutItemMap(layout)
+        
+        # Position et taille de la carte (en mm)
+        map_x = request.map_margin_left
+        map_y = request.map_margin_top
+        map_width = page.pageSize().width() - request.map_margin_left - request.map_margin_right
+        map_height = page.pageSize().height() - request.map_margin_top - request.map_margin_bottom
+        
+        # Réserver de l'espace pour le titre si nécessaire
+        if request.show_title and request.title:
+            map_y += request.title_font_size * 1.5  # Espace pour le titre
+            map_height -= request.title_font_size * 1.5
+        
+        # Réserver de l'espace pour la légende si nécessaire
+        if request.show_legend:
+            if request.legend_position in ["right", "left"]:
+                if request.legend_position == "right":
+                    map_width -= request.legend_width
+                else:
+                    map_x += request.legend_width
+                    map_width -= request.legend_width
+            else:  # top, bottom
+                if request.legend_position == "bottom":
+                    map_height -= request.legend_height
+                else:
+                    map_y += request.legend_height
+                    map_height -= request.legend_height
+        
+        map_item.attemptMove(QgsLayoutPoint(map_x, map_y, QgsUnitTypes.LayoutMillimeters))
+        map_item.attemptResize(QgsLayoutSize(map_width, map_height, QgsUnitTypes.LayoutMillimeters))
+        
+        # Définir l'étendue de la carte
+        extent = None
+        if request.bbox:
+            coords = [float(x) for x in request.bbox.split(',')]
+            if len(coords) == 4:
+                extent = QgsRectangle(coords[0], coords[1], coords[2], coords[3])
+            else:
+                return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format bbox doit être: xmin,ymin,xmax,ymax"))
+        
+        if extent:
+            map_item.setExtent(extent)
+        else:
+            # Calculer l'étendue du projet
+            project_extent = QgsRectangle()
+            project_extent.setMinimal()
+            visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid() and not layer.extent().isEmpty()]
+            for layer in visible_layers:
+                if project_extent.isEmpty():
+                    project_extent = QgsRectangle(layer.extent())
+                else:
+                    project_extent.combineExtentWith(layer.extent())
+            
+            if not project_extent.isEmpty():
+                # Ajouter une marge
+                margin = 0.05
+                width_margin = (project_extent.xMaximum() - project_extent.xMinimum()) * margin
+                height_margin = (project_extent.yMaximum() - project_extent.yMinimum()) * margin
+                extended_extent = QgsRectangle(
+                    project_extent.xMinimum() - width_margin,
+                    project_extent.yMinimum() - height_margin,
+                    project_extent.xMaximum() + width_margin,
+                    project_extent.yMaximum() + height_margin
+                )
+                map_item.setExtent(extended_extent)
+            else:
+                map_item.setExtent(QgsRectangle(-180, -90, 180, 90))
+        
+        # Définir l'échelle si spécifiée
+        if request.scale:
+            try:
+                scale_value = float(request.scale)
+                if scale_value > 0:
+                    map_item.setScale(scale_value)
+            except ValueError:
+                pass
+        
+        # Configurer les couches visibles
+        visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
+        map_item.setLayers(visible_layers)
+        
+        layout.addLayoutItem(map_item)
+        
+        # Ajouter le titre si demandé
+        if request.show_title and request.title:
+            title_item = QgsLayoutItemLabel(layout)
+            title_item.setText(request.title)
+            title_item.setFont(QFont("Arial", request.title_font_size, QFont.Bold))
+            
+            # Position du titre
+            title_width = page.pageSize().width() - 2 * request.map_margin_left
+            title_height = request.title_font_size * 1.2
+            title_x = request.map_margin_left
+            title_y = request.map_margin_top / 2
+            
+            title_item.attemptMove(QgsLayoutPoint(title_x, title_y, QgsUnitTypes.LayoutMillimeters))
+            title_item.attemptResize(QgsLayoutSize(title_width, title_height, QgsUnitTypes.LayoutMillimeters))
+            title_item.setHAlign(Qt.AlignHCenter)
+            title_item.setVAlign(Qt.AlignVCenter)
+            
+            layout.addLayoutItem(title_item)
+        
+        # Ajouter la légende si demandée
+        if request.show_legend:
+            legend_item = QgsLayoutItemLegend(layout)
+            legend_item.setLinkedMap(map_item)
+            
+            # Position de la légende selon sa position demandée
+            if request.legend_position == "right":
+                legend_x = map_x + map_width + 5
+                legend_y = map_y
+                legend_w = request.legend_width - 5
+                legend_h = map_height
+            elif request.legend_position == "left":
+                legend_x = request.map_margin_left
+                legend_y = map_y
+                legend_w = request.legend_width - 5
+                legend_h = map_height
+            elif request.legend_position == "bottom":
+                legend_x = map_x
+                legend_y = map_y + map_height + 5
+                legend_w = map_width
+                legend_h = request.legend_height - 5
+            else:  # top
+                legend_x = map_x
+                legend_y = request.map_margin_top
+                legend_w = map_width
+                legend_h = request.legend_height - 5
+            
+            legend_item.attemptMove(QgsLayoutPoint(legend_x, legend_y, QgsUnitTypes.LayoutMillimeters))
+            legend_item.attemptResize(QgsLayoutSize(legend_w, legend_h, QgsUnitTypes.LayoutMillimeters))
+            
+            layout.addLayoutItem(legend_item)
+        
+        # Ajouter l'échelle graphique si demandée
+        if request.show_scale_bar:
+            scale_bar_item = QgsLayoutItemScaleBar(layout)
+            scale_bar_item.setLinkedMap(map_item)
+            
+            # Position de l'échelle (coin inférieur gauche de la carte)
+            scale_x = map_x + 5
+            scale_y = map_y + map_height - 15
+            scale_w = 50
+            scale_h = 10
+            
+            scale_bar_item.attemptMove(QgsLayoutPoint(scale_x, scale_y, QgsUnitTypes.LayoutMillimeters))
+            scale_bar_item.attemptResize(QgsLayoutSize(scale_w, scale_h, QgsUnitTypes.LayoutMillimeters))
+            
+            layout.addLayoutItem(scale_bar_item)
+        
+        # Ajouter la flèche du nord si demandée
+        if request.show_north_arrow:
+            # Créer un élément image pour la flèche du nord (simplifiée avec du texte)
+            north_item = QgsLayoutItemLabel(layout)
+            north_item.setText("N ↑")
+            north_item.setFont(QFont("Arial", 12, QFont.Bold))
+            
+            # Position de la flèche (coin supérieur droit de la carte)
+            north_x = map_x + map_width - 20
+            north_y = map_y + 5
+            north_w = 15
+            north_h = 15
+            
+            north_item.attemptMove(QgsLayoutPoint(north_x, north_y, QgsUnitTypes.LayoutMillimeters))
+            north_item.attemptResize(QgsLayoutSize(north_w, north_h, QgsUnitTypes.LayoutMillimeters))
+            north_item.setHAlign(Qt.AlignHCenter)
+            north_item.setVAlign(Qt.AlignVCenter)
+            
+            layout.addLayoutItem(north_item)
+        
+        # Ajouter les formes personnalisées
+        if request.shapes:
+            for shape_data in request.shapes:
+                try:
+                    shape_item = create_shape_item(layout, shape_data, map_item)
+                    if shape_item:
+                        layout.addLayoutItem(shape_item)
+                except Exception as e:
+                    print(f"Erreur lors de la création de la forme {shape_data.type}: {e}")
+        
+        # Ajouter les étiquettes personnalisées  
+        if request.labels:
+            for label_data in request.labels:
+                try:
+                    label_item = create_label_item(layout, label_data, map_item)
+                    if label_item:
+                        layout.addLayoutItem(label_item)
+                except Exception as e:
+                    print(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}")
+        
+        # Exporter le layout
+        exporter = QgsLayoutExporter(layout)
+        
+        # Créer le fichier temporaire
+        fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
+        os.close(fd)
+        session.add_temp_file(out_path)
+        
+        # Configuration d'exportation
+        if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg]:
+            export_settings = exporter.ImageExportSettings()
+            export_settings.dpi = request.dpi
+            export_settings.imageSize = QSize()  # Taille automatique basée sur le DPI
+            
+            result = exporter.exportToImage(out_path, export_settings)
+            media_type = "image/jpeg"
+            
+        elif request.format_image == ImageFormat.png:
+            export_settings = exporter.ImageExportSettings()
+            export_settings.dpi = request.dpi
+            export_settings.imageSize = QSize()
+            
+            result = exporter.exportToImage(out_path, export_settings)
+            media_type = "image/png"
+            
+        elif request.format_image == "pdf":
+            export_settings = exporter.PdfExportSettings()
+            export_settings.dpi = request.dpi
+            export_settings.rasterizeWholeImage = False
+            
+            result = exporter.exportToPdf(out_path, export_settings)
+            media_type = "application/pdf"
+        
+        else:
+            return JSONResponse(status_code=400, content=standard_response(success=False, message="Format d'image non supporté"))
+        
+        # Vérifier le résultat de l'exportation
+        if result != QgsLayoutExporter.Success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, message="Erreur lors de l'exportation du layout"))
+        
+        background_tasks.add_task(os.remove, out_path)
+        
+        return FileResponse(out_path, media_type=media_type, filename=f"layout.{request.format_image}")
+        
+    except Exception as e:
+        return handle_exception(e, "render_print_layout", "Impossible de générer le layout d'impression")
 
 @app.post("/croquis/generate")
 def generate_croquis(request: GenerateCroquisRequest):
