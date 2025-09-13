@@ -29,7 +29,7 @@ import logging
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Query, Path as FastPath, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, Literal
 import uvicorn
 from PyQt5.QtCore import QSize, Qt, QPoint, QBuffer, QByteArray, QIODevice
 from PyQt5.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont, QImageReader
