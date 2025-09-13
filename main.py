@@ -412,7 +412,8 @@ class QgisManager:
                 QgsSymbol,
                 QgsSimpleFillSymbolLayer,
                 QgsSimpleLineSymbolLayer,
-                QgsLayoutMeasurement
+                QgsLayoutMeasurement,
+                QgsLayoutPage
             )
 
             from qgis.analysis import QgsNativeAlgorithms
@@ -476,7 +477,8 @@ class QgisManager:
                 'QgsSymbol': QgsSymbol,
                 'QgsSimpleFillSymbolLayer': QgsSimpleFillSymbolLayer,
                 'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer,
-                'QgsLayoutMeasurement': QgsLayoutMeasurement
+                'QgsLayoutMeasurement': QgsLayoutMeasurement,
+                'QgsLayoutPage': QgsLayoutPage
             }
 
             self._initialized = True
