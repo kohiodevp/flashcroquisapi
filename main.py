@@ -774,6 +774,78 @@ async def periodic_cleanup():
         await asyncio.sleep(3600)
         cleanup_expired_sessions(max_age_hours=24)
 
+def create_print_layout_with_qgs(layout_name, project, map_items_config=None):
+    """
+    Créer un layout QGIS avec QgsPrintLayout pour générer des PDF professionnels
+    """
+    try:
+        
+        
+        # Obtenir les classes QGIS
+        classes = get_qgis_manager().get_classes()
+        QgsLayoutItemMap = classes['QgsLayoutItemMap']
+        QgsLayoutItemLegend = classes['QgsLayoutItemLegend']
+        QgsLayoutItemLabel = classes['QgsLayoutItemLabel']
+        QgsLayoutItemScaleBar = classes['QgsLayoutItemScaleBar']
+        QgsLayoutItemPage = classes['QgsLayoutItemPage']
+        QgsPrintLayout = classes['QgsPrintLayout']
+        QgsUnitTypes = classes['QgsUnitTypes']
+        QgsLayoutPoint = classes['QgsLayoutPoint']
+        QgsLayoutSize = classes['QgsLayoutSize']
+        
+        locale.setlocale(locale.LC_TIME, "fr_FR")
+        date = datetime.now().strftime(r"%d %B %Y")
+        # Créer un nouveau layout
+        layout = QgsPrintLayout(project)
+        layout.initializeDefaults()
+        
+        layout=QgsPrintLayout(project)
+        layout.initializeDefaults()
+        pc = layout.pageCollection()
+        page = pc.pages()[0]
+        page.setPageSize("A4", QgsLayoutItemPage.Portrait)
+        
+        data = [
+            {"text": "MINISTERE DE L'ECONOMIE ET DES FINANCES", "x": 5, "y": 5, "width": 90, "height": 10, "font_size": 12, "is_bold": 1},
+            {"text": "*********************", "x": 5, "y": 12, "width": 90, "height": 10, "font_size": 12, "is_bold": 0},
+            {"text": "SECRETARIAT GENERAL", "x": 5, "y": 17, "width": 90, "height": 10, "font_size": 12, "is_bold": 1},
+            {"text": "*********************", "x": 5, "y": 22, "width": 90, "height": 10, "font_size": 12, "is_bold": 0},
+            {"text": "DIRECTION GENERALE DES IMPOTS", "x": 10, "y": 27, "width": 90, "height": 10, "font_size": 12, "is_bold": 1},
+            {"text": "*********************", "x": 5, "y": 32, "width": 90, "height": 10, "font_size": 12, "is_bold": 0},
+            {"text": "DIRECTION REGIONALE DES IMPOTS DU GUIRIKO", "x": 5, "y": 39, "width": 90, "height": 10, "font_size": 12, "is_bold": 1},
+            {"text": "*********************", "x": 5, "y": 46, "width": 90, "height": 10, "font_size": 12, "is_bold": 0},
+            {"text": "SERVICE DU CADASTRE ET DES TRAVAUX FONCIERS DU GUIRIKO", "x": 5, "y": 53, "width": 90, "height": 10, "font_size": 12, "is_bold": 1},
+            {"text": "*********************", "x": 5, "y": 60, "width": 90, "height": 10, "font_size": 12, "is_bold": 0},
+            {"text": f"N°......./MEF/SG/DGI/DRI-GRK/SCTF-GRK", "x": 10, "y": 75, "width": 90, "height": 10, "font_size": 12, "is_bold": 0},
+    
+    
+            {"text": "BURKINA FASO", "x": 120, "y": 5, "width": 90, "height": 10, "font_size": 12, "is_bold": 1},
+            {"text": "La Patrie ou la Mort, Nous vaincrons", "x": 120, "y": 10, "width": 90, "height": 10, "font_size": 10, "is_bold": 1},
+            {"text": f"Bobo-Dioulasso le {date}", "x": 120, "y": 30, "width": 90, "height": 10, "font_size": 12, "is_bold": 0},
+    
+    
+            {"text": "FICHE D’IDENTIFICATION CADASTRALE", "x": 5, "y": 105, "width": 200, "height": 10, "font_size": 24, "is_bold": 1},
+    
+        ]
+        for d in data:
+            A = QgsLayoutItemLabel(layout)
+            A.setText(d['text'])
+            A.setFont(QFont("Times New Roman",d['font_size'],QFont.Bold if d['is_bold'] == 1 else QFont.Normal))
+            A.setHAlign(Qt.AlignCenter)
+            A.setVAlign(Qt.AlignCenter)
+            A.attemptMove(QgsLayoutPoint(d['x'],d['y'],QgsUnitTypes.LayoutMillimeters))
+            A.attemptResize(QgsLayoutSize(d['width'],d['height'],QgsUnitTypes.LayoutMillimeters))
+            layout.addItem(A)
+            
+        return layout
+        
+    except Exception as e:
+        logger.error(f"Erreur lors de la création du layout: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return None
+ 
+
 def generate_pdf_from_layout(layout, output_path):
     """
     Générer un PDF à partir d'un QgsPrintLayout
@@ -2150,21 +2222,21 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # layout.setName(request.layout_name or "Carte")
         
         # # Configurer les dimensions de page
-        # page_collection = layout.pageCollection()
-        # if page_collection.pageCount() > 0:
-        #     page = page_collection.page(0)
-        #     if request.page_format == "A4":
-        #         if request.orientation == "portrait":
-        #             page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
-        #         else:
-        #             page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
-        #     elif request.page_format == "A3":
-        #         if request.orientation == "portrait":
-        #             page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
-        #         else:
-        #             page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
-        #     else:  # Custom
-        #         page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
+        page_collection = layout.pageCollection()
+        if page_collection.pageCount() > 0:
+            page = page_collection.page[0]
+            if request.page_format == "A4":
+                if request.orientation == "portrait":
+                    page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
+                else:
+                    page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
+            elif request.page_format == "A3":
+                if request.orientation == "portrait":
+                    page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
+                else:
+                    page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
+            else:  # Custom
+                page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
 
         # Ajouter l'élément carte principal
         map_item = QgsLayoutItemMap(layout)
