@@ -2388,7 +2388,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
             data={"nom": "croquis.pdf"},
             message="Croquis généré avec succès au format pdf",
             metadata={
-                'download_url': f"/download/{os.path.basename(out_path)}",
+                'download_url': f"{file_path}",
                 'preview_available': True
             }
         )
