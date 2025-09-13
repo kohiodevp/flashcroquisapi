@@ -2375,9 +2375,18 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         if result != QgsLayoutExporter.Success:
             return JSONResponse(status_code=500, content=standard_response(success=False, message="Erreur lors de l'exportation du layout"))
         
-        background_tasks.add_task(os.remove, out_path)
+        # background_tasks.add_task(os.remove, out_path)
         
-        return FileResponse(out_path, media_type=media_type, filename=f"layout.{request.format_image}")
+        # return FileResponse(out_path, media_type=media_type, filename=f"layout.{request.format_image}")
+        return standard_response(
+            success=True,
+            data={"nom": "croquis.pdf"},
+            message="Croquis généré avec succès au format pdf",
+            metadata={
+                'download_url': f"/download/{os.path.basename(out_path)}",
+                'preview_available': True
+            }
+        )
         
     except Exception as e:
         return handle_exception(e, "render_print_layout", "Impossible de générer le layout d'impression")
@@ -2471,7 +2480,7 @@ async def upload_file(file: UploadFile = File(...)):
         if file.size > max_size:
             return JSONResponse(status_code=400, content=standard_response(success=False, message=f"Taille maximale dépassée (max: 50MB, actuel: {file.size / 1024 / 1024:.2f}MB)"))
 
-        allowed_extensions = ['.shp', '.shx', '.dbf', '.prj', '.geojson', '.kml', '.kmz', '.tif', '.tiff', '.jpg', '.jpeg', '.png', '.csv']
+        allowed_extensions = ['.qgs', '.qgz', '.shp', '.shx', '.dbf', '.prj', '.geojson', '.kml', '.kmz', '.tif', '.tiff', '.jpg', '.jpeg', '.png', '.csv', '.gpx']
         file_extension = Path(file.filename).suffix.lower()
         if file_extension not in allowed_extensions:
             return JSONResponse(status_code=400, content=standard_response(success=False, message=f"Type de fichier non autorisé. Extensions autorisées: {', '.join(allowed_extensions)}"))
