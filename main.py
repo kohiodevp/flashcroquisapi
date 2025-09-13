@@ -2091,6 +2091,7 @@ def render_map(request: MapRequest, background_tasks: BackgroundTasks):
     except Exception as e:
         return handle_exception(e, "render_map", "Impossible de générer le rendu de la carte")
 
+
 @app.post("/map/print-layout")
 def render_print_layout(request: PrintLayoutRequest, background_tasks: BackgroundTasks):
     try:
@@ -2122,18 +2123,11 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         layout.initializeDefaults()
         layout.setName(request.layout_name or "Carte")
         
-        # --- CORRECTION 1: Gestion correcte de la page ---
+        # Configurer les dimensions de page
         page_collection = layout.pageCollection()
-        
-        if page_collection.pageCount() == 0:
-            logger.warning("Aucune page trouvée dans le layout après initializeDefaults. La configuration de la taille de page pourrait échouer.")
-        
-        # Maintenant il y a au moins une page
-        page = page_collection.page(0) 
-
-        try:
-            page = page_collection.page(0) # Cela pourrait échouer si aucune page n'existe.
-            if request.page_format == PageFormat.A4: # Utiliser l'enum directement
+        if page_collection.pageCount() > 0:
+            page = page_collection.page(0)
+            if request.page_format == PageFormat.A4: # Comparer avec l'enum
                 if request.orientation == Orientation.PORTRAIT:
                     page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
                 else:
@@ -2143,21 +2137,13 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
                 else:
                     page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
-            else:  # CUSTOM
-                if request.custom_width and request.custom_height: # Vérification
-                     page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
-                # Pas de else par défaut ici car CUSTOM implique que les dimensions sont fournies.
-        except Exception as e:
-             logger.error(f"Erreur lors de la configuration de la taille de la page: {e}")
-    
+            else:  # Custom
+                page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
 
         # Calculer les dimensions de la page pour les calculs suivants
         page_width_mm = page.pageSize().width()
         page_height_mm = page.pageSize().height()
-        
-        # ... (le reste du code de configuration du layout reste globalement le même,
-        # mais avec quelques corrections mineures et l'utilisation des enums) ...
-        
+
         # Ajouter l'élément carte principal
         map_item = QgsLayoutItemMap(layout)
         # Position et taille de la carte (en mm)
@@ -2167,9 +2153,8 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         map_height = page_height_mm - request.map_margin_top - request.map_margin_bottom
         # Réserver de l'espace pour le titre si nécessaire
         if request.show_title and request.title:
-            title_space = request.title_font_size * 1.5  # Espace pour le titre
-            map_y += title_space
-            map_height -= title_space
+            map_y += request.title_font_size * 1.5  # Espace pour le titre
+            map_height -= request.title_font_size * 1.5
         # Réserver de l'espace pour la légende si nécessaire
         if request.show_legend:
             if request.legend_position in [LegendPosition.RIGHT, LegendPosition.LEFT]:
@@ -2182,10 +2167,8 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 if request.legend_position == LegendPosition.BOTTOM:
                     map_height -= request.legend_height
                 else:
-                    title_space_if_any = request.title_font_size * 1.5 if (request.show_title and request.title) else 0
-                    map_y += request.legend_height + title_space_if_any
+                    map_y += request.legend_height
                     map_height -= request.legend_height
-
         map_item.attemptMove(QgsLayoutPoint(map_x, map_y, QgsUnitTypes.LayoutMillimeters))
         map_item.attemptResize(QgsLayoutSize(map_width, map_height, QgsUnitTypes.LayoutMillimeters))
         # Définir l'étendue de la carte
@@ -2232,7 +2215,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 if scale_value > 0:
                     map_item.setScale(scale_value)
             except ValueError:
-                pass # Ignorer une échelle mal formée
+                pass
         # Configurer les couches visibles
         visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
         map_item.setLayers(visible_layers)
@@ -2274,7 +2257,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 legend_h = request.legend_height - 5
             else:  # top
                 legend_x = map_x
-                legend_y = request.map_margin_top + (request.title_font_size * 1.5 if (request.show_title and request.title) else 0)
+                legend_y = request.map_margin_top
                 legend_w = map_width
                 legend_h = request.legend_height - 5
             legend_item.attemptMove(QgsLayoutPoint(legend_x, legend_y, QgsUnitTypes.LayoutMillimeters))
@@ -2327,7 +2310,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 except Exception as e:
                     logger.error(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}") # Utiliser logger
 
-        # --- CORRECTION 2: Utiliser un fichier temporaire pour l'exportation ---
+        # --- CORRECTION 1: Utiliser un fichier temporaire pour l'exportation ---
         fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
         os.close(fd)
         session.add_temp_file(out_path) # Pour nettoyage potentiel
@@ -2335,10 +2318,15 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # Exporter le layout
         exporter = QgsLayoutExporter(layout)
         
-        # --- CORRECTION 3: Accès correct à l'énumération ExportResult ---
-        # Utiliser l'objet ExportResult depuis les classes récupérées
-        ExportResult = classes['QgsLayoutExporter'].ExportResult 
-        result = ExportResult.Fail # Valeur par défaut
+        # --- CORRECTION 2: Accès correct et sûr à l'énumération ExportResult ---
+        # Récupérer l'énumération ExportResult
+        ExportResultEnum = QgsLayoutExporter.ExportResult
+        # Définir une valeur par défaut pour result en utilisant getattr pour éviter l'AttributeError
+        # On suppose que 'Success' existe toujours. Si 'Fail'/'Failure' existe, on l'utilise, sinon on utilise une valeur arbitraire.
+        # La valeur par défaut est choisie pour être différente de Success (généralement 0).
+        result_default_value = getattr(ExportResultEnum, 'Failure', getattr(ExportResultEnum, 'Fail', 1)) 
+        result = result_default_value # Valeur par défaut
+        
         media_type = "application/octet-stream"
         
         # Configuration d'exportation
@@ -2360,44 +2348,44 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
             export_settings = QgsLayoutExporter.PdfExportSettings()
             export_settings.dpi = request.dpi
             export_settings.rasterizeWholeImage = False
-            # --- CORRECTION 4: Utiliser exportToPdf avec le bon nom de méthode ---
+            # --- CORRECTION 3: Utiliser exportToPdf avec le bon nom de méthode ---
             result = exporter.exportToPdf(out_path, export_settings) 
             media_type = "application/pdf"
         else:
             return JSONResponse(status_code=400, content=standard_response(success=False, message="Format d'image non supporté"))
 
         # Vérifier le résultat de l'exportation
-        # --- CORRECTION 5: Message d'erreur plus explicite ---
-        if result != ExportResult.Success: # Comparer avec l'enum Success
-            error_msg_map = {
-                # Utiliser les membres réels de l'énumération
-                getattr(ExportResult, 'MemoryError', ExportResult.Fail): "Erreur mémoire",
-                getattr(ExportResult, 'FileError', ExportResult.Fail): "Erreur de fichier",
-                getattr(ExportResult, 'PrintError', ExportResult.Fail): "Erreur d'impression",
-                getattr(ExportResult, 'SvgLayerError', ExportResult.Fail): "Erreur de couche SVG",
-                getattr(ExportResult, 'InvalidSourceError', ExportResult.Fail): "Source invalide",
-                ExportResult.Fail: "Échec inconnu"
-            }
+        # --- CORRECTION 4: Message d'erreur plus explicite et accès sûr aux membres ---
+        success_result = getattr(ExportResultEnum, 'Success', 0) # On suppose que Success vaut 0
+        if result != success_result:
+            # Construire un message d'erreur basé sur les membres disponibles
+            error_msg_map = {}
+            # Essayer d'accéder aux membres connus de manière sûre
+            known_errors = ['MemoryError', 'FileError', 'PrintError', 'SvgLayerError', 'InvalidSourceError', 'Failure', 'Fail']
+            for err_name in known_errors:
+                err_value = getattr(ExportResultEnum, err_name, None)
+                if err_value is not None:
+                    error_msg_map[err_value] = err_name
+            
             # Utiliser get pour éviter une autre AttributeError si le membre n'existe pas
-            specific_error = error_msg_map.get(result, f"Erreur inconnue (Code: {result})")
+            specific_error_code = result # Utiliser directement la valeur numérique
+            specific_error_name = error_msg_map.get(result, f"Code d'erreur inconnu: {result}")
             return JSONResponse(
                 status_code=500, 
                 content=standard_response(
                     success=False, 
-                    message=f"Erreur lors de l'exportation du layout: {specific_error} (Code: {result})"
+                    message=f"Erreur lors de l'exportation du layout: {specific_error_name} (Code: {specific_error_code})"
                 )
             )
 
-        # --- CORRECTION 6: Nettoyer le fichier temporaire après l'envoi ---
+        # --- CORRECTION 5: Nettoyer le fichier temporaire après l'envoi ---
         background_tasks.add_task(os.remove, out_path) 
         
-        # --- CORRECTION 7: Retourner le fichier généré ---
+        # --- CORRECTION 6: Retourner le fichier généré ---
         return FileResponse(out_path, media_type=media_type, filename=f"layout.{request.format_image}")
 
     except Exception as e:
         # S'assurer que le fichier temporaire est nettoyé en cas d'exception
-        # Note: Cela ne couvre pas tous les cas, mais c'est un début.
-        # Une gestion plus robuste nécessiterait de stocker `out_path` dans un scope plus large.
         return handle_exception(e, "render_print_layout", "Impossible de générer le layout d'impression")
 
 
