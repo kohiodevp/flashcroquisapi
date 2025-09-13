@@ -774,6 +774,27 @@ async def periodic_cleanup():
         await asyncio.sleep(3600)
         cleanup_expired_sessions(max_age_hours=24)
 
+def generate_pdf_from_layout(layout, output_path):
+    """
+    Générer un PDF à partir d'un QgsPrintLayout
+    """
+    try:
+        # Obtenir les classes QGIS
+        classes = get_qgis_manager().get_classes()
+        QgsLayoutExporter = classes['QgsLayoutExporter']
+        
+        # Exporter le layout en PDF
+        exporter = QgsLayoutExporter(layout)
+        result = exporter.exportToPdf(output_path)
+        
+        if result == QgsLayoutExporter.Success:
+            return True, output_path
+        else:
+            return False, f"Erreur d'exportation PDF: {result}"
+            
+    except Exception as e:
+        return False, str(e)
+
 def create_shape_item(layout, shape_data: ShapeItem, map_item):
     """Crée un élément forme dans le layout"""
     manager = get_qgis_manager()
@@ -2097,13 +2118,16 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
     try:
         if not request.session_id:
             return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
+
         success, error = initialize_qgis_if_needed()
         if not success:
             return JSONResponse(status_code=500, content=standard_response(success=False, error=error, message="Échec de l'initialisation de QGIS"))
+
         with project_sessions_lock:
             session = project_sessions.get(request.session_id)
             if session is None:
                 return JSONResponse(status_code=404, content=standard_response(success=False, message="Session non trouvée"))
+
         manager = get_qgis_manager()
         classes = manager.get_classes()
         QgsProject = classes['QgsProject']
@@ -2117,7 +2141,9 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         QgsLayoutSize = classes['QgsLayoutSize']
         QgsRectangle = classes['QgsRectangle']
         QgsUnitTypes = classes['QgsUnitTypes']
+
         project = session.get_project(QgsProject)
+        
         # Créer le layout
         layout = QgsPrintLayout(project)
         layout.initializeDefaults()
@@ -2127,61 +2153,60 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         page_collection = layout.pageCollection()
         if page_collection.pageCount() > 0:
             page = page_collection.page(0)
-            if request.page_format == PageFormat.A4: # Comparer avec l'enum
-                if request.orientation == Orientation.PORTRAIT:
+            if request.page_format == "A4":
+                if request.orientation == "portrait":
                     page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
                 else:
                     page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
-            elif request.page_format == PageFormat.A3:
-                if request.orientation == Orientation.PORTRAIT:
+            elif request.page_format == "A3":
+                if request.orientation == "portrait":
                     page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
                 else:
                     page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
             else:  # Custom
                 page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
 
-        # Calculer les dimensions de la page pour les calculs suivants
-        page_width_mm = page.pageSize().width()
-        page_height_mm = page.pageSize().height()
-
         # Ajouter l'élément carte principal
         map_item = QgsLayoutItemMap(layout)
+        
         # Position et taille de la carte (en mm)
         map_x = request.map_margin_left
         map_y = request.map_margin_top
-        map_width = page_width_mm - request.map_margin_left - request.map_margin_right
-        map_height = page_height_mm - request.map_margin_top - request.map_margin_bottom
+        map_width = page.pageSize().width() - request.map_margin_left - request.map_margin_right
+        map_height = page.pageSize().height() - request.map_margin_top - request.map_margin_bottom
+        
         # Réserver de l'espace pour le titre si nécessaire
         if request.show_title and request.title:
             map_y += request.title_font_size * 1.5  # Espace pour le titre
             map_height -= request.title_font_size * 1.5
+        
         # Réserver de l'espace pour la légende si nécessaire
         if request.show_legend:
-            if request.legend_position in [LegendPosition.RIGHT, LegendPosition.LEFT]:
-                if request.legend_position == LegendPosition.RIGHT:
+            if request.legend_position in ["right", "left"]:
+                if request.legend_position == "right":
                     map_width -= request.legend_width
                 else:
                     map_x += request.legend_width
                     map_width -= request.legend_width
             else:  # top, bottom
-                if request.legend_position == LegendPosition.BOTTOM:
+                if request.legend_position == "bottom":
                     map_height -= request.legend_height
                 else:
                     map_y += request.legend_height
                     map_height -= request.legend_height
+        
         map_item.attemptMove(QgsLayoutPoint(map_x, map_y, QgsUnitTypes.LayoutMillimeters))
         map_item.attemptResize(QgsLayoutSize(map_width, map_height, QgsUnitTypes.LayoutMillimeters))
+        
         # Définir l'étendue de la carte
         extent = None
         if request.bbox:
-            try: # Ajout de try/except pour le parsing de bbox
-                coords = [float(x) for x in request.bbox.split(',')]
-                if len(coords) == 4:
-                    extent = QgsRectangle(coords[0], coords[1], coords[2], coords[3])
-                else:
-                    return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format bbox doit être: xmin,ymin,xmax,ymax"))
-            except ValueError:
-                 return JSONResponse(status_code=400, content=standard_response(success=False, message="Format de bbox invalide. Les coordonnées doivent être des nombres."))
+            coords = [float(x) for x in request.bbox.split(',')]
+            if len(coords) == 4:
+                extent = QgsRectangle(coords[0], coords[1], coords[2], coords[3])
+            else:
+                return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format bbox doit être: xmin,ymin,xmax,ymax"))
+        
         if extent:
             map_item.setExtent(extent)
         else:
@@ -2194,6 +2219,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     project_extent = QgsRectangle(layer.extent())
                 else:
                     project_extent.combineExtentWith(layer.extent())
+            
             if not project_extent.isEmpty():
                 # Ajouter une marge
                 margin = 0.05
@@ -2208,6 +2234,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 map_item.setExtent(extended_extent)
             else:
                 map_item.setExtent(QgsRectangle(-180, -90, 180, 90))
+        
         # Définir l'échelle si spécifiée
         if request.scale:
             try:
@@ -2216,41 +2243,49 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     map_item.setScale(scale_value)
             except ValueError:
                 pass
+        
         # Configurer les couches visibles
         visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
         map_item.setLayers(visible_layers)
+        
         layout.addLayoutItem(map_item)
+        
         # Ajouter le titre si demandé
         if request.show_title and request.title:
             title_item = QgsLayoutItemLabel(layout)
             title_item.setText(request.title)
             title_item.setFont(QFont("Arial", request.title_font_size, QFont.Bold))
+            
             # Position du titre
-            title_width = page_width_mm - 2 * request.map_margin_left
+            title_width = page.pageSize().width() - 2 * request.map_margin_left
             title_height = request.title_font_size * 1.2
             title_x = request.map_margin_left
             title_y = request.map_margin_top / 2
+            
             title_item.attemptMove(QgsLayoutPoint(title_x, title_y, QgsUnitTypes.LayoutMillimeters))
             title_item.attemptResize(QgsLayoutSize(title_width, title_height, QgsUnitTypes.LayoutMillimeters))
             title_item.setHAlign(Qt.AlignHCenter)
             title_item.setVAlign(Qt.AlignVCenter)
+            
             layout.addLayoutItem(title_item)
+        
         # Ajouter la légende si demandée
         if request.show_legend:
             legend_item = QgsLayoutItemLegend(layout)
             legend_item.setLinkedMap(map_item)
+            
             # Position de la légende selon sa position demandée
-            if request.legend_position == LegendPosition.RIGHT:
+            if request.legend_position == "right":
                 legend_x = map_x + map_width + 5
                 legend_y = map_y
                 legend_w = request.legend_width - 5
                 legend_h = map_height
-            elif request.legend_position == LegendPosition.LEFT:
+            elif request.legend_position == "left":
                 legend_x = request.map_margin_left
                 legend_y = map_y
                 legend_w = request.legend_width - 5
                 legend_h = map_height
-            elif request.legend_position == LegendPosition.BOTTOM:
+            elif request.legend_position == "bottom":
                 legend_x = map_x
                 legend_y = map_y + map_height + 5
                 legend_w = map_width
@@ -2260,37 +2295,48 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 legend_y = request.map_margin_top
                 legend_w = map_width
                 legend_h = request.legend_height - 5
+            
             legend_item.attemptMove(QgsLayoutPoint(legend_x, legend_y, QgsUnitTypes.LayoutMillimeters))
             legend_item.attemptResize(QgsLayoutSize(legend_w, legend_h, QgsUnitTypes.LayoutMillimeters))
+            
             layout.addLayoutItem(legend_item)
+        
         # Ajouter l'échelle graphique si demandée
         if request.show_scale_bar:
             scale_bar_item = QgsLayoutItemScaleBar(layout)
             scale_bar_item.setLinkedMap(map_item)
+            
             # Position de l'échelle (coin inférieur gauche de la carte)
             scale_x = map_x + 5
             scale_y = map_y + map_height - 15
             scale_w = 50
             scale_h = 10
+            
             scale_bar_item.attemptMove(QgsLayoutPoint(scale_x, scale_y, QgsUnitTypes.LayoutMillimeters))
             scale_bar_item.attemptResize(QgsLayoutSize(scale_w, scale_h, QgsUnitTypes.LayoutMillimeters))
+            
             layout.addLayoutItem(scale_bar_item)
+        
         # Ajouter la flèche du nord si demandée
         if request.show_north_arrow:
             # Créer un élément image pour la flèche du nord (simplifiée avec du texte)
             north_item = QgsLayoutItemLabel(layout)
             north_item.setText("N ↑")
             north_item.setFont(QFont("Arial", 12, QFont.Bold))
+            
             # Position de la flèche (coin supérieur droit de la carte)
             north_x = map_x + map_width - 20
             north_y = map_y + 5
             north_w = 15
             north_h = 15
+            
             north_item.attemptMove(QgsLayoutPoint(north_x, north_y, QgsUnitTypes.LayoutMillimeters))
             north_item.attemptResize(QgsLayoutSize(north_w, north_h, QgsUnitTypes.LayoutMillimeters))
             north_item.setHAlign(Qt.AlignHCenter)
             north_item.setVAlign(Qt.AlignVCenter)
+            
             layout.addLayoutItem(north_item)
+        
         # Ajouter les formes personnalisées
         if request.shapes:
             for shape_data in request.shapes:
@@ -2299,7 +2345,8 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     if shape_item:
                         layout.addLayoutItem(shape_item)
                 except Exception as e:
-                    logger.error(f"Erreur lors de la création de la forme {shape_data.type}: {e}") # Utiliser logger
+                    print(f"Erreur lors de la création de la forme {shape_data.type}: {e}")
+        
         # Ajouter les étiquettes personnalisées  
         if request.labels:
             for label_data in request.labels:
@@ -2308,86 +2355,54 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     if label_item:
                         layout.addLayoutItem(label_item)
                 except Exception as e:
-                    logger.error(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}") # Utiliser logger
-
-        # --- CORRECTION 1: Utiliser un fichier temporaire pour l'exportation ---
-        fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
-        os.close(fd)
-        session.add_temp_file(out_path) # Pour nettoyage potentiel
-
+                    print(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}")
+        
         # Exporter le layout
         exporter = QgsLayoutExporter(layout)
         
-        # --- CORRECTION 2: Accès correct et sûr à l'énumération ExportResult ---
-        # Récupérer l'énumération ExportResult
-        ExportResultEnum = QgsLayoutExporter.ExportResult
-        # Définir une valeur par défaut pour result en utilisant getattr pour éviter l'AttributeError
-        # On suppose que 'Success' existe toujours. Si 'Fail'/'Failure' existe, on l'utilise, sinon on utilise une valeur arbitraire.
-        # La valeur par défaut est choisie pour être différente de Success (généralement 0).
-        result_default_value = getattr(ExportResultEnum, 'Failure', getattr(ExportResultEnum, 'Fail', 1)) 
-        result = result_default_value # Valeur par défaut
-        
-        media_type = "application/octet-stream"
+        # Créer le fichier temporaire
+        fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
+        os.close(fd)
+        session.add_temp_file(out_path)
         
         # Configuration d'exportation
-        if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg, ImageFormat.png]:
-            export_settings = QgsLayoutExporter.ImageExportSettings()
+        if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg]:
+            export_settings = exporter.ImageExportSettings()
             export_settings.dpi = request.dpi
-            # La taille de l'image est dérivée automatiquement de la taille de la page et du DPI
-            # export_settings.imageSize n'est pas nécessaire pour l'exportation directe vers fichier
+            export_settings.imageSize = QSize()  # Taille automatique basée sur le DPI
             
-            if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg]:
-                # Spécifier le format pour l'exportation
-                result = exporter.exportToImage(out_path, export_settings, 'JPEG') 
-                media_type = "image/jpeg"
-            else: # PNG
-                result = exporter.exportToImage(out_path, export_settings, 'PNG')
-                media_type = "image/png"
-                
-        elif request.format_image == "pdf": # Comparer avec une chaîne de caractères pour l'instant
-            export_settings = QgsLayoutExporter.PdfExportSettings()
+            result = exporter.exportToImage(out_path, export_settings)
+            media_type = "image/jpeg"
+            
+        elif request.format_image == ImageFormat.png:
+            export_settings = exporter.ImageExportSettings()
             export_settings.dpi = request.dpi
-            export_settings.rasterizeWholeImage = False
-            # --- CORRECTION 3: Utiliser exportToPdf avec le bon nom de méthode ---
-            result = exporter.exportToPdf(out_path, export_settings) 
+            export_settings.imageSize = QSize()
+            
+            result = exporter.exportToImage(out_path, export_settings)
+            media_type = "image/png"
+            
+        elif request.format_image == "pdf":
+            export_settings = exporter.PdfExportSettings()
+            # export_settings.dpi = request.dpi
+            # export_settings.rasterizeWholeImage = False
+            
+            result = exporter.exportToPdf(out_path, export_settings)
             media_type = "application/pdf"
+        
         else:
             return JSONResponse(status_code=400, content=standard_response(success=False, message="Format d'image non supporté"))
-
-        # Vérifier le résultat de l'exportation
-        # --- CORRECTION 4: Message d'erreur plus explicite et accès sûr aux membres ---
-        success_result = getattr(ExportResultEnum, 'Success', 0) # On suppose que Success vaut 0
-        if result != success_result:
-            # Construire un message d'erreur basé sur les membres disponibles
-            error_msg_map = {}
-            # Essayer d'accéder aux membres connus de manière sûre
-            known_errors = ['MemoryError', 'FileError', 'PrintError', 'SvgLayerError', 'InvalidSourceError', 'Failure', 'Fail']
-            for err_name in known_errors:
-                err_value = getattr(ExportResultEnum, err_name, None)
-                if err_value is not None:
-                    error_msg_map[err_value] = err_name
-            
-            # Utiliser get pour éviter une autre AttributeError si le membre n'existe pas
-            specific_error_code = result # Utiliser directement la valeur numérique
-            specific_error_name = error_msg_map.get(result, f"Code d'erreur inconnu: {result}")
-            return JSONResponse(
-                status_code=500, 
-                content=standard_response(
-                    success=False, 
-                    message=f"Erreur lors de l'exportation du layout: {specific_error_name} (Code: {specific_error_code})"
-                )
-            )
-
-        # --- CORRECTION 5: Nettoyer le fichier temporaire après l'envoi ---
-        background_tasks.add_task(os.remove, out_path) 
         
-        # --- CORRECTION 6: Retourner le fichier généré ---
+        # Vérifier le résultat de l'exportation
+        if result != QgsLayoutExporter.Success:
+            return JSONResponse(status_code=500, content=standard_response(success=False, message="Erreur lors de l'exportation du layout"))
+        
+        background_tasks.add_task(os.remove, out_path)
+        
         return FileResponse(out_path, media_type=media_type, filename=f"layout.{request.format_image}")
-
+        
     except Exception as e:
-        # S'assurer que le fichier temporaire est nettoyé en cas d'exception
         return handle_exception(e, "render_print_layout", "Impossible de générer le layout d'impression")
-
 
 @app.post("/croquis/generate")
 def generate_croquis(request: GenerateCroquisRequest):
