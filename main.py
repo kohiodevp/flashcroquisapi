@@ -2430,6 +2430,10 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                         layout.addLayoutItem(label_item)
                 except Exception as e:
                     print(f"Erreur lors de la création de l'étiquette '{label_data.text}': {e}")
+
+        map_item.refresh()
+        layout.refresh()
+
         
         # Exporter le layout
         exporter = QgsLayoutExporter(layout)
@@ -2457,9 +2461,10 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
             media_type = "image/png"
             
         elif request.format_image == "pdf":
-            export_settings = exporter.PdfExportSettings()
-            export_settings.dpi = request.dpi
-            export_settings.rasterizeWholeImage = False
+            export_settings = QgsLayoutExporter.PdfExportSettings()
+            export_settings.dpi = 300
+            export_settings.rasterizeWholeImage = True
+
             
             result = exporter.exportToPdf(out_path, export_settings)
             media_type = "application/pdf"
