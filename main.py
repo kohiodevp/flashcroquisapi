@@ -2120,10 +2120,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # Créer le layout
         layout = QgsPrintLayout(project)
         layout.initializeDefaults()
-        layout.setName(request.layout_name or "Carte")
-        
-        # --- CORRECTION 1: Ajouter le layout au projet ---
-        project.addLayout(layout) 
+        layout.setName(request.layout_name or "Carte") 
         
         # Configurer les dimensions de page
         page_collection = layout.pageCollection()
@@ -2387,7 +2384,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # Note: Cela ne couvre pas tous les cas, mais c'est un début.
         # Une gestion plus robuste nécessiterait de stocker `out_path` dans un scope plus large.
         return handle_exception(e, "render_print_layout", "Impossible de générer le layout d'impression")
-        
+
 @app.post("/croquis/generate")
 def generate_croquis(request: GenerateCroquisRequest):
     try:
