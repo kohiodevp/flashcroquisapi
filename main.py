@@ -2224,7 +2224,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         # # Configurer les dimensions de page
         page_collection = layout.pageCollection()
         if page_collection.pageCount() > 0:
-            page = page_collection.pages[0]
+            page = page_collection.pages()[0]
             if request.page_format == "A4":
                 if request.orientation == "portrait":
                     page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
