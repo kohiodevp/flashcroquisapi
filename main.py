@@ -2242,18 +2242,18 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
 
         # Ajouter l'élément carte principal
         map_item = QgsLayoutItemMap(layout)
-        
+
         # Position et taille de la carte (en mm)
         map_x = request.map_margin_left
         map_y = request.map_margin_top
         map_width = page.pageSize().width() - request.map_margin_left - request.map_margin_right
         map_height = page.pageSize().height() - request.map_margin_top - request.map_margin_bottom
-        
+
         # Réserver de l'espace pour le titre si nécessaire
         if request.show_title and request.title:
-            map_y += request.title_font_size * 1.5  # Espace pour le titre
+            map_y += request.title_font_size * 1.5
             map_height -= request.title_font_size * 1.5
-        
+
         # Réserver de l'espace pour la légende si nécessaire
         if request.show_legend:
             if request.legend_position in ["right", "left"]:
@@ -2262,16 +2262,16 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 else:
                     map_x += request.legend_width
                     map_width -= request.legend_width
-            else:  # top, bottom
+            else:
                 if request.legend_position == "bottom":
                     map_height -= request.legend_height
                 else:
                     map_y += request.legend_height
                     map_height -= request.legend_height
-        
+
         map_item.attemptMove(QgsLayoutPoint(map_x, map_y, QgsUnitTypes.LayoutMillimeters))
         map_item.attemptResize(QgsLayoutSize(map_width, map_height, QgsUnitTypes.LayoutMillimeters))
-        
+
         # Définir l'étendue de la carte
         extent = None
         if request.bbox:
@@ -2280,61 +2280,33 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                 extent = QgsRectangle(coords[0], coords[1], coords[2], coords[3])
             else:
                 return JSONResponse(status_code=400, content=standard_response(success=False, message="Le format bbox doit être: xmin,ymin,xmax,ymax"))
-        
+
         if extent:
             map_item.setExtent(extent)
         else:
             # Calculer l'étendue du projet
-            # Calculer l'étendue du projet de manière plus fiable
-            project_extent = None
-            visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
-
+            project_extent = QgsRectangle()
+            project_extent.setMinimal()
+            visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid() and not layer.extent().isEmpty()]
             for layer in visible_layers:
-                layer_extent = layer.extent()
-                # Vérification robuste : l'étendue doit être non-vide ET avoir une largeur/hauteur significative
-                if (not layer_extent.isEmpty() and
-                    layer_extent.width() > 1e-8 and
-                    layer_extent.height() > 1e-8):
-                    if project_extent is None:
-                        project_extent = QgsRectangle(layer_extent)
-                    else:
-                        project_extent.combineExtentWith(layer_extent)
-
-            if project_extent is not None and not project_extent.isEmpty():
-                # Ajouter une marge de 5%
-                margin_x = project_extent.width() * 0.05
-                margin_y = project_extent.height() * 0.05
+                if project_extent.isEmpty():
+                    project_extent = QgsRectangle(layer.extent())
+                else:
+                    project_extent.combineExtentWith(layer.extent())
+            if not project_extent.isEmpty():
+                margin = 0.05
+                width_margin = (project_extent.xMaximum() - project_extent.xMinimum()) * margin
+                height_margin = (project_extent.yMaximum() - project_extent.yMinimum()) * margin
                 extended_extent = QgsRectangle(
-                    project_extent.xMinimum() - margin_x,
-                    project_extent.yMinimum() - margin_y,
-                    project_extent.xMaximum() + margin_x,
-                    project_extent.yMaximum() + margin_y
+                    project_extent.xMinimum() - width_margin,
+                    project_extent.yMinimum() - height_margin,
+                    project_extent.xMaximum() + width_margin,
+                    project_extent.yMaximum() + height_margin
                 )
                 map_item.setExtent(extended_extent)
-                logger.info(f"Extent défini pour le layout: {extended_extent.toString()}")
             else:
-                # Fallback : utiliser l'étendue d'une couche valide individuelle
-                for layer in visible_layers:
-                    layer_extent = layer.extent()
-                    if (not layer_extent.isEmpty() and
-                        layer_extent.width() > 1e-8 and
-                        layer_extent.height() > 1e-8):
-                        margin_x = layer_extent.width() * 0.05
-                        margin_y = layer_extent.height() * 0.05
-                        extended_extent = QgsRectangle(
-                            layer_extent.xMinimum() - margin_x,
-                            layer_extent.yMinimum() - margin_y,
-                            layer_extent.xMaximum() + margin_x,
-                            layer_extent.yMaximum() + margin_y
-                        )
-                        map_item.setExtent(extended_extent)
-                        logger.info(f"Extent défini à partir d'une couche unique: {extended_extent.toString()}")
-                        break
-                else:
-                    # Dernier recours : étendue par défaut
-                    logger.warning("Aucune étendue valide trouvée, utilisation de l'étendue par défaut.")
-                    map_item.setExtent(QgsRectangle(-180, -90, 180, 90))
-                    
+                map_item.setExtent(QgsRectangle(-180, -90, 180, 90))
+
         # Définir l'échelle si spécifiée
         if request.scale:
             try:
@@ -2343,12 +2315,16 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
                     map_item.setScale(scale_value)
             except ValueError:
                 pass
-        
-        # Configurer les couches visibles
-        visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
-        map_item.setLayers(visible_layers)
-        
+
+        # AJOUTER L'ÉLÉMENT DE CARTE AU LAYOUT AVANT DE CONFIGURER LES COUCHES
         layout.addLayoutItem(map_item)
+
+        # MAINTENANT, CONFIGURER LES COUCHES À AFFICHER
+        visible_layers = [layer for layer in project.mapLayers().values() if layer.isValid()]
+        map_item.setLayers(visible_layers)  # <-- Cette ligne est cruciale et doit être ici.
+
+        # Optionnel : Lier la carte au projet (peut aider dans certains cas)
+        # map_item.setProject(project)  # Décommentez si le bug persiste.
         
         # Ajouter le titre si demandé
         if request.show_title and request.title:
