@@ -2473,7 +2473,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         if result != QgsLayoutExporter.Success:
             return JSONResponse(status_code=500, content=standard_response(success=False, message="Erreur lors de l'exportation du layout"))
         
-        background_tasks.add_task(os.remove, out_path)
+        # background_tasks.add_task(os.remove, out_path)
         
         return FileResponse(out_path, media_type=media_type, filename=f"layout.{request.format_image}")
         
