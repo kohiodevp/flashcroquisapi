@@ -411,7 +411,8 @@ class QgisManager:
                 QgsLayoutItemShape,
                 QgsSymbol,
                 QgsSimpleFillSymbolLayer,
-                QgsSimpleLineSymbolLayer
+                QgsSimpleLineSymbolLayer,
+                QgsLayoutItemPage
             )
 
             from qgis.analysis import QgsNativeAlgorithms
@@ -475,6 +476,7 @@ class QgisManager:
                 'QgsSymbol': QgsSymbol,
                 'QgsSimpleFillSymbolLayer': QgsSimpleFillSymbolLayer,
                 'QgsSimpleLineSymbolLayer': QgsSimpleLineSymbolLayer
+                'QgsLayoutItemPage': QgsLayoutItemPage
             }
 
             self._initialized = True
@@ -2213,6 +2215,7 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         QgsLayoutSize = classes['QgsLayoutSize']
         QgsRectangle = classes['QgsRectangle']
         QgsUnitTypes = classes['QgsUnitTypes']
+        QgsLayoutItemPage = classes['QgsLayoutItemPage']
 
         project = session.get_project(QgsProject)
         
@@ -2227,16 +2230,16 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
             page = page_collection.pages()[0]
             if request.page_format == "A4":
                 if request.orientation == "portrait":
-                    page.setPageSize(QgsLayoutSize(210, 297, QgsUnitTypes.LayoutMillimeters))
+                    page.setPageSize("A4", QgsLayoutItemPage.Portrait))
                 else:
-                    page.setPageSize(QgsLayoutSize(297, 210, QgsUnitTypes.LayoutMillimeters))
+                    page.setPageSize("A4", QgsLayoutItemPage.Landscape))
             elif request.page_format == "A3":
                 if request.orientation == "portrait":
-                    page.setPageSize(QgsLayoutSize(297, 420, QgsUnitTypes.LayoutMillimeters))
+                    page.setPageSize("A3", QgsLayoutItemPage.Portrait))
                 else:
-                    page.setPageSize(QgsLayoutSize(420, 297, QgsUnitTypes.LayoutMillimeters))
-            else:  # Custom
-                page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
+                    page.setPageSize("A3", QgsLayoutItemPage.Landscape))
+            # else:  # Custom
+            #     page.setPageSize(QgsLayoutSize(request.custom_width, request.custom_height, QgsUnitTypes.LayoutMillimeters))
 
         # Ajouter l'élément carte principal
         map_item = QgsLayoutItemMap(layout)
