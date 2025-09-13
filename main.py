@@ -2339,9 +2339,14 @@ def render_print_layout(request: PrintLayoutRequest, background_tasks: Backgroun
         exporter = QgsLayoutExporter(layout)
         
         # Créer le fichier temporaire
-        fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
-        os.close(fd)
-        session.add_temp_file(out_path)
+        # fd, out_path = tempfile.mkstemp(suffix=f".{request.format_image}")
+        # os.close(fd)
+        # session.add_temp_file(out_path)
+        upload_dir = os.path.join(Path.home(), 'DocsFlashCroquis')
+        os.makedirs(upload_dir, exist_ok=True)
+
+        unique_filename = f"{uuid.uuid4().hex}_{request.format_image}"
+        file_path = os.path.join(upload_dir, unique_filename)
         
         # Configuration d'exportation
         if request.format_image in [ImageFormat.jpg, ImageFormat.jpeg]:
