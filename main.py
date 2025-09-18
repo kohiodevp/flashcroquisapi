@@ -366,7 +366,9 @@ class QgisManager:
     def _setup_qgis_environment(self):
         os.environ['QT_QPA_PLATFORM'] = 'offscreen'
         os.environ['QT_DEBUG_PLUGINS'] = '0'
-        os.environ['QT_QPA_FONTDIR'] = os.path.join(os.path.dirname(__file__), 'ttf')
+        os.environ['QGIS_PREFIX_PATH']="/usr"
+        os.environ['PYTHONPATH']="/usr/share/qgis/python"
+        os.environ['QT_QPA_FONTDIR'] = 'ttf/'
         os.environ['QT_NO_CPU_FEATURE'] = 'sse4.1,sse4.2,avx,avx2'
         logger.info("Environnement QGIS configuré")
 
@@ -1373,8 +1375,20 @@ def load_project(request: LoadProjectRequest):
     except Exception as e:
         return handle_exception(e, "load_project", "Impossible de charger le projet")
 
+@app.get("/project/list")
+def list_project():
+    try:
+        
+        return standard_response(
+            success=True,
+            data=project_sessions,
+            message=f"La liste des projets récupérée ({len(project_sessions)} projets)"
+        )
+    except Exception as e:
+        return handle_exception(e, "list_project", "Impossible de récupérer la liste des projets")
+
 @app.get("/project/info")
-def project_info(session_id: str = Query(..., description="ID de session")):
+def info_project(session_id: str = Query(..., description="ID de session")):
     try:
         if not session_id:
             return JSONResponse(status_code=400, content=standard_response(success=False, message="L'identifiant de session est requis"))
